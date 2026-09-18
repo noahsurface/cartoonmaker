@@ -44,6 +44,17 @@ Mapping: left stick / d-pad → move (Arrow keys / WASD), face button 0 or right
 
 Canvas capture via `canvas.captureStream()` + `MediaRecorder`, recording webm. The export view plays the full composited scene at real time speed while capturing, then offers the result as a download. Resolution/frame rate are fixed to a 1280x720 stage (matches the 16:9 sample background) with a 30fps capture default; a control for picking an alternate resolution is exposed since it was cheap to add.
 
+## Testing
+
+Since I can't operate a physical gamepad, the app was driven end-to-end with a headless browser using the keyboard fallback path (which shares all the same code as gamepad input past `InputSource.sample()`):
+
+- Full flow: seed content loads → assets/characters/scenes list correctly → character builder shows all three layer blocks with working add/remove/role assignment → scene editor drag-to-place/scale/z-order/remove works → recording via keyboard produces a saved track → play/pause/restart transport works → export produces a real, playable 1280x720/30fps webm (verified with ffprobe).
+- Recorded rapid-fire canvas screenshots during a walk → direction-reverse → stop sequence and confirmed visually: the character's silhouette narrows to an edge-on sliver mid-turn (the paper-flip), the shadow tracks the character's translation, and sway/bounce are present while moving.
+- Recorded character 1, then started recording character 2 while character 1's track played back, and confirmed via screenshots that character 1 continued advancing along its recorded path (not frozen) while character 2 moved independently under live keyboard control — this is the core "animate one at a time, others play back" requirement.
+- Added an object (prop) to a scene and confirmed it places, drags, and renders correctly alongside a character.
+- Checked layout at a 390px-wide mobile viewport — single-column, usable, no overflow.
+- No gamepad hardware was available to test the actual Gamepad API branch of `input.js` directly; the code path is a straightforward `navigator.getGamepads()` poll using the standard button/axis indices, mirrored 1:1 with the keyboard path that was tested.
+
 ## Known simplifications (given the "work independently" brief)
 
 - The "move cycle" and "talk loop" are just an ordered list of frames the user assigns and are stepped through by elapsed time — there's no concept of matching cycle speed to actual movement speed beyond a fixed frame rate. Fine for the flat crayon-style sample art; a more physically-accurate walk cycle would need pose data this art doesn't have.
