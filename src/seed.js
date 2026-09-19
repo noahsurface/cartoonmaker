@@ -16,6 +16,13 @@ const SAMPLE_IDS = {
   eyesBlink: 'sample-asset-eyes-blink',
 };
 
+// Shared effect graphics used for every character in every scene (not part
+// of any one character's own layers), uploaded via the `assets` branch.
+export const FX_ASSET_IDS = {
+  shadow: 'fx-asset-shadow',
+  bubble: ['fx-asset-bubble-0', 'fx-asset-bubble-1', 'fx-asset-bubble-2', 'fx-asset-bubble-3'],
+};
+
 export const SAMPLE_CHARACTER_ID = 'sample-character-buddy';
 export const SAMPLE_SCENE_ID = 'sample-scene-starter';
 
@@ -38,6 +45,11 @@ export async function seedSampleContent() {
     ensureAsset(SAMPLE_IDS.eyesForward, 'Eyes - forward', 'character/eyes/open.png'),
     ensureAsset(SAMPLE_IDS.eyesSide, 'Eyes - side', 'character/eyes/side.png'),
     ensureAsset(SAMPLE_IDS.eyesBlink, 'Eyes - blink', 'character/eyes/blink.png'),
+    ensureAsset(FX_ASSET_IDS.shadow, 'Character shadow', 'fx/shadow.png'),
+    ensureAsset(FX_ASSET_IDS.bubble[0], 'Speech bubble 1', 'fx/speech-bubble-000.png'),
+    ensureAsset(FX_ASSET_IDS.bubble[1], 'Speech bubble 2', 'fx/speech-bubble-001.png'),
+    ensureAsset(FX_ASSET_IDS.bubble[2], 'Speech bubble 3', 'fx/speech-bubble-002.png'),
+    ensureAsset(FX_ASSET_IDS.bubble[3], 'Speech bubble 4', 'fx/speech-bubble-003.png'),
   ]);
 
   const existingChar = await getRecord('characters', SAMPLE_CHARACTER_ID);
@@ -81,7 +93,7 @@ export async function seedSampleContent() {
       backgroundAssetId: SAMPLE_IDS.background,
       updatedAt: Date.now(),
       entities: [
-        { id: 'entity-buddy-1', kind: 'character', refId: SAMPLE_CHARACTER_ID, name: 'Buddy', x: 0.3, y: 0.72, scale: 0.34, z: 1 },
+        { id: 'entity-buddy-1', kind: 'character', refId: SAMPLE_CHARACTER_ID, name: 'Buddy', x: 768, y: 1037, scale: 0.34, z: 1 },
       ],
       tracks: {},
     };

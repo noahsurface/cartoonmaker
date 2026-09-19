@@ -44,7 +44,9 @@ export function pickAsset() {
     });
 
     const grid = box.querySelector('#picker-grid');
-    const assets = (await getAll('assets')).sort((a, b) => b.createdAt - a.createdAt);
+    const assets = (await getAll('assets'))
+      .filter((a) => a.mime?.startsWith('image/'))
+      .sort((a, b) => b.createdAt - a.createdAt);
     if (assets.length === 0) {
       grid.innerHTML = '<div class="empty-state">No assets yet. Upload one above.</div>';
     }

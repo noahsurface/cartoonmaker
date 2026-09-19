@@ -13,18 +13,19 @@ export async function render(root) {
     grid.innerHTML = '';
     for (const asset of assets) {
       const url = await getAssetUrl(asset.id);
+      const isImage = asset.mime?.startsWith('image/');
       const card = document.createElement('div');
       card.className = 'card';
       card.innerHTML = `
-        <div class="thumb"><img src="${url}" alt="${escapeHtml(asset.name)}" /></div>
+        <div class="thumb">${isImage ? `<img src="${url}" alt="${escapeHtml(asset.name)}" />` : '<span style="font-size:2rem">🔊</span>'}</div>
         <div class="label"><span title="${escapeHtml(asset.name)}">${escapeHtml(asset.name)}</span>
           <button class="btn danger small icon-only" title="Delete">✕</button>
         </div>
       `;
       card.querySelector('button').addEventListener('click', async (e) => {
         e.stopPropagation();
-        if (asset.id.startsWith('sample-asset-')) {
-          alert('This is a bundled sample asset used by the starter character/scene, so it can\'t be deleted.');
+        if (asset.id.startsWith('sample-asset-') || asset.id.startsWith('fx-asset-')) {
+          alert('This is a bundled asset used by the app (starter content or a shared effect like the shadow/speech bubble), so it can\'t be deleted.');
           return;
         }
         if (confirm(`Delete "${asset.name}"? This can't be undone.`)) {

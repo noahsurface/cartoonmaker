@@ -2,6 +2,7 @@ import { getRecord, putRecord, getAll, uid } from '../db.js';
 import { navigate } from '../main.js';
 import { SceneRuntime, STAGE_WIDTH, STAGE_HEIGHT } from '../engine/scene.js';
 import { FEET_ANCHOR_Y } from '../engine/character.js';
+import { REF_WIDTH, clampToBounds } from '../engine/coords.js';
 import { getCachedImage } from '../utils/image-cache.js';
 import { pickAsset } from './asset-picker.js';
 
@@ -85,8 +86,8 @@ export async function render(root, params) {
       kind: 'character',
       refId: charId,
       name: characterById.get(charId)?.name || 'Character',
-      x: 0.5,
-      y: 0.75,
+      x: 1280,
+      y: 1080,
       scale: 0.32,
       z: nextZ(),
     };
@@ -104,8 +105,8 @@ export async function render(root, params) {
       kind: 'object',
       refId: objId,
       name: objectById.get(objId)?.name || 'Object',
-      x: 0.5,
-      y: 0.85,
+      x: 1280,
+      y: 1224,
       scale: 0.18,
       z: nextZ(),
     };
@@ -205,18 +206,24 @@ export async function render(root, params) {
     runtime.render(ctx, 0, null, selectedEntityId);
   }
 
+  // Canvas pixels and reference-space pixels differ by a fixed uniform
+  // factor (canvas aspect always matches REF_WIDTH x REF_HEIGHT).
+  const refScale = STAGE_WIDTH / REF_WIDTH;
+
   function entityBounds(entity) {
     const w = STAGE_WIDTH;
     const h = STAGE_HEIGHT;
+    const originX = entity.x * refScale;
+    const originY = entity.y * refScale;
     const size = entity.scale * h;
     if (entity.kind === 'character') {
-      return { left: entity.x * w - size * 0.4, right: entity.x * w + size * 0.4, top: entity.y * h - size * FEET_ANCHOR_Y, bottom: entity.y * h };
+      return { left: originX - size * 0.4, right: originX + size * 0.4, top: originY - size * FEET_ANCHOR_Y, bottom: originY };
     }
     const obj = objectById.get(entity.refId);
     const img = obj ? getCachedImage(obj.assetId) : null;
     const aspect = img ? img.width / img.height : 1;
     const dw = size * aspect;
-    return { left: entity.x * w - dw / 2, right: entity.x * w + dw / 2, top: entity.y * h - size, bottom: entity.y * h };
+    return { left: originX - dw / 2, right: originX + dw / 2, top: originY - size, bottom: originY };
   }
 
   function canvasPointFromEvent(e) {
@@ -236,7 +243,7 @@ export async function render(root, params) {
       });
     if (hit) {
       selectEntity(hit.id);
-      dragState = { id: hit.id, offsetX: pt.x / STAGE_WIDTH - hit.x, offsetY: pt.y / STAGE_HEIGHT - hit.y };
+      dragState = { id: hit.id, offsetX: pt.x / refScale - hit.x, offsetY: pt.y / refScale - hit.y };
       canvas.setPointerCapture(e.pointerId);
     }
   });
@@ -245,8 +252,9 @@ export async function render(root, params) {
     const pt = canvasPointFromEvent(e);
     const entity = scene.entities.find((en) => en.id === dragState.id);
     if (!entity) return;
-    entity.x = Math.max(0.02, Math.min(0.98, pt.x / STAGE_WIDTH - dragState.offsetX));
-    entity.y = Math.max(0.1, Math.min(0.98, pt.y / STAGE_HEIGHT - dragState.offsetY));
+    const clamped = clampToBounds(pt.x / refScale - dragState.offsetX, pt.y / refScale - dragState.offsetY);
+    entity.x = clamped.x;
+    entity.y = clamped.y;
     drawFrame();
   });
   const onWindowPointerUp = async () => {

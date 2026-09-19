@@ -6,13 +6,22 @@
 import { getCachedImage, preloadMany } from '../utils/image-cache.js';
 
 const FLIP_DURATION = 0.32; // seconds for a paper-flip turn
-const WALK_CYCLE_HZ = 1.8; // sway/bounce oscillation speed while moving
-const SWAY_AMPLITUDE = 0.045; // fraction of character size
-const BOUNCE_AMPLITUDE = 0.05;
-const MOVE_SPEED_EPS = 0.05; // normalized units/sec below which we call it "stopped"
+const MAX_CYCLE_HZ = 2.2; // walk-cycle oscillation speed at full (500px/s) speed
+const SWAY_DEGREES = 7; // feet-anchored tilt, alternating +/- this many degrees
+const BOUNCE_AMPLITUDE = 0.05; // fraction of character size
+const MOVE_SPEED_EPS = 15; // px/sec below which we call it "stopped"
+const EYES_SIDE_EPS = 20; // px/sec of horizontal speed before eyes look sideways
 const CYCLE_FPS = 6; // body move-cycle frame rate
 const TALK_FPS = 10; // mouth talk-loop frame rate
+const BUBBLE_FPS = 8; // speech bubble loop frame rate
+const BLINK_MIN_INTERVAL = 2; // seconds
+const BLINK_MAX_INTERVAL = 4; // seconds
+const BLINK_DURATION = 0.125; // seconds
 export const FEET_ANCHOR_Y = 0.82; // fraction down the 1200x1200 art where the feet sit
+
+function randomBlinkInterval() {
+  return BLINK_MIN_INTERVAL + Math.random() * (BLINK_MAX_INTERVAL - BLINK_MIN_INTERVAL);
+}
 
 export function collectCharacterAssetIds(character) {
   const ids = [];
@@ -35,7 +44,7 @@ function frameAssetId(layer, frameId) {
 }
 
 /** Resolve which body/mouth/eyes asset should be showing right now. */
-export function resolvePoseAssets(character, { moving, mouthHeld, eyesState, poseClock }) {
+export function resolvePoseAssets(character, { moving, mouthHeld, poseClock, eyesLook, blinking }) {
   const body = character.layers?.body;
   const mouth = character.layers?.mouth;
   const eyes = character.layers?.eyes;
@@ -55,8 +64,8 @@ export function resolvePoseAssets(character, { moving, mouthHeld, eyesState, pos
   }
 
   let eyesFrameId = eyes?.roles?.forward ?? eyes?.frames?.[0]?.id ?? null;
-  if (eyesState === 'side' && eyes?.roles?.side) eyesFrameId = eyes.roles.side;
-  else if (eyesState === 'blink' && eyes?.roles?.blink) eyesFrameId = eyes.roles.blink;
+  if (blinking && eyes?.roles?.blink) eyesFrameId = eyes.roles.blink;
+  else if (eyesLook === 'side' && eyes?.roles?.side) eyesFrameId = eyes.roles.side;
 
   return {
     bodyAssetId: frameAssetId(body, bodyFrameId),
@@ -67,10 +76,11 @@ export function resolvePoseAssets(character, { moving, mouthHeld, eyesState, pos
 
 /**
  * Tracks one character instance's continuous animation state (facing,
- * flip-turn progress, walk-cycle phase) purely as a function of the
- * position samples it's fed. Feed it live pointer/stick deltas, or feed it
- * interpolated positions from a recorded track — the visual result is the
- * same either way.
+ * flip-turn progress, walk-cycle phase, eye look/blink) purely as a function
+ * of the position/mouth samples it's fed. Feed it live input each frame, or
+ * feed it interpolated positions from a recorded track — the visual result
+ * is the same either way. Positions are absolute pixels in the shared
+ * 2560x1440 reference space (see engine/scene.js).
  */
 export class CharacterAnimState {
   constructor(startX = 0, startY = 0) {
@@ -82,11 +92,20 @@ export class CharacterAnimState {
     this.walkPhase = 0;
     this.moving = false;
     this.poseClock = 0;
+    this.eyesLook = 'forward'; // 'forward' | 'side', driven by horizontal movement
+    this.isBlinking = false;
+    this.blinkTimer = randomBlinkInterval();
+    this.talking = false;
+    this.talkClock = 0;
     this._hasSample = false;
   }
 
-  /** @param {number} x @param {number} y normalized scene coords @param {number} dt seconds */
-  update(x, y, dt) {
+  /**
+   * @param {number} x @param {number} y absolute pixels in the 2560x1440 reference space
+   * @param {number} dt seconds
+   * @param {boolean} mouthHeld whether this character is currently talking
+   */
+  update(x, y, dt, mouthHeld = false) {
     dt = Math.max(0, Math.min(dt, 0.25));
     const prevX = this._hasSample ? this.x : x;
     const prevY = this._hasSample ? this.y : y;
@@ -95,11 +114,14 @@ export class CharacterAnimState {
     this.moving = speed > MOVE_SPEED_EPS;
 
     const dx = x - prevX;
-    if (dx > 0.0015 && this.facing !== 1) {
+    const hSpeed = dt > 0 ? Math.abs(dx) / dt : 0;
+    this.eyesLook = hSpeed > EYES_SIDE_EPS ? 'side' : 'forward';
+
+    if (dx > 0.4 && this.facing !== 1) {
       this.facing = 1;
       this.flipFrom = -1;
       this.flipT = 0;
-    } else if (dx < -0.0015 && this.facing !== -1) {
+    } else if (dx < -0.4 && this.facing !== -1) {
       this.facing = -1;
       this.flipFrom = 1;
       this.flipT = 0;
@@ -109,7 +131,8 @@ export class CharacterAnimState {
     }
 
     if (this.moving) {
-      this.walkPhase += dt * WALK_CYCLE_HZ * Math.PI * 2;
+      const cycleHz = MAX_CYCLE_HZ * Math.min(1, speed / 500);
+      this.walkPhase += dt * cycleHz * Math.PI * 2;
       this.poseClock += dt;
     } else {
       // Ease the phase back to the nearest resting point (upright, feet
@@ -118,6 +141,25 @@ export class CharacterAnimState {
       this.walkPhase += (nearestRest - this.walkPhase) * Math.min(1, dt * 12);
       this.poseClock = 0;
     }
+
+    // Random independent blinking, on top of whatever the eyes are otherwise doing.
+    if (this.isBlinking) {
+      this.blinkTimer -= dt;
+      if (this.blinkTimer <= 0) {
+        this.isBlinking = false;
+        this.blinkTimer = randomBlinkInterval();
+      }
+    } else {
+      this.blinkTimer -= dt;
+      if (this.blinkTimer <= 0) {
+        this.isBlinking = true;
+        this.blinkTimer = BLINK_DURATION;
+      }
+    }
+
+    if (mouthHeld && !this.talking) this.talkClock = 0;
+    this.talking = mouthHeld;
+    if (mouthHeld) this.talkClock += dt;
 
     this.x = x;
     this.y = y;
@@ -131,14 +173,18 @@ export class CharacterAnimState {
     return this.flipFrom * Math.cos(this.flipT * Math.PI);
   }
 
-  get swayOffset() {
+  get swayAngle() {
     // walkPhase itself eases back to the nearest multiple of 2*PI when
     // stopped, so sin(walkPhase) already decays to 0 smoothly on its own.
-    return Math.sin(this.walkPhase) * SWAY_AMPLITUDE;
+    return Math.sin(this.walkPhase) * (SWAY_DEGREES * Math.PI) / 180;
   }
 
   get bounceOffset() {
     return Math.abs(Math.sin(this.walkPhase)) * BOUNCE_AMPLITUDE;
+  }
+
+  get bubbleFrameIndex() {
+    return Math.floor(this.talkClock * BUBBLE_FPS) % 4;
   }
 }
 
@@ -147,29 +193,32 @@ export class CharacterAnimState {
  * @param {CanvasRenderingContext2D} ctx
  * @param {CharacterAnimState} state
  * @param {{bodyAssetId:?string, mouthAssetId:?string, eyesAssetId:?string}} pose
- * @param {{originX:number, originY:number, size:number}} geom pixel-space placement
+ * @param {{originX:number, originY:number, size:number}} geom pixel-space placement (originY = ground/feet level)
+ * @param {{shadowImg:?HTMLImageElement, bubbleFrames:HTMLImageElement[]}} fx shared effect images
  */
-export function drawCharacter(ctx, state, pose, geom) {
+export function drawCharacter(ctx, state, pose, geom, fx = {}) {
   const { originX, originY, size } = geom;
   const bodyImg = getCachedImage(pose.bodyAssetId);
   if (!bodyImg) return;
   const mouthImg = getCachedImage(pose.mouthAssetId);
   const eyesImg = getCachedImage(pose.eyesAssetId);
 
-  // Shadow: stays under the feet, tracks position, ignores sway/bounce/flip.
-  ctx.save();
-  ctx.globalAlpha = 0.3;
-  ctx.fillStyle = '#000';
-  ctx.beginPath();
-  ctx.ellipse(originX, originY, size * 0.24, size * 0.065, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
+  // Shadow: stays on the ground under the feet, tracks position, ignores sway/bounce/flip.
+  if (fx.shadowImg) {
+    const shadowAspect = fx.shadowImg.width / fx.shadowImg.height || 4;
+    const shadowW = size * 0.62;
+    const shadowH = shadowW / shadowAspect;
+    ctx.drawImage(fx.shadowImg, originX - shadowW / 2, originY - shadowH / 2, shadowW, shadowH);
+  }
 
-  const swayPx = state.swayOffset * size;
   const bouncePx = state.bounceOffset * size;
+  const feetPivotY = originY - bouncePx;
 
+  // Body/mouth/eyes: rotated together about the (bounced) feet pivot, so the
+  // sway tilts the character while its feet stay anchored above the shadow.
   ctx.save();
-  ctx.translate(originX + swayPx, originY - bouncePx);
+  ctx.translate(originX, feetPivotY);
+  ctx.rotate(state.swayAngle);
   ctx.scale(state.scaleX, 1);
   const half = size / 2;
   const top = -size * FEET_ANCHOR_Y;
@@ -177,4 +226,19 @@ export function drawCharacter(ctx, state, pose, geom) {
   if (mouthImg) ctx.drawImage(mouthImg, -half, top, size, size);
   if (eyesImg) ctx.drawImage(eyesImg, -half, top, size, size);
   ctx.restore();
+
+  // Speech bubble: follows the character's position/bounce but stays upright
+  // (no sway rotation or facing-flip), anchored above and to the right of the head.
+  if (state.talking && fx.bubbleFrames?.length) {
+    const bubbleImg = fx.bubbleFrames[state.bubbleFrameIndex % fx.bubbleFrames.length];
+    if (bubbleImg) {
+      const bubbleSize = size * 0.5;
+      const aspect = bubbleImg.width / bubbleImg.height || 1;
+      const bw = bubbleSize * aspect;
+      const bh = bubbleSize;
+      const anchorX = originX + size * 0.18;
+      const anchorY = feetPivotY - size * FEET_ANCHOR_Y - size * 0.02;
+      ctx.drawImage(bubbleImg, anchorX, anchorY - bh, bw, bh);
+    }
+  }
 }

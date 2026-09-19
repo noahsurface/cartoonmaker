@@ -7,8 +7,9 @@
 //   left stick / d-pad      -> move                | Arrow keys / WASD
 //   face button 0 (A/Cross) -> hold to talk (mouth) | Space
 //   right trigger (7)       -> hold to talk (mouth) | (no separate key)
-//   face button 2 (X/Square)-> hold for side-eyes   | Shift
-//   face button 1 (B/Circle)-> hold to blink        | B key
+//
+// Eye direction and blinking are fully automatic (see CharacterAnimState)
+// and have no input mapping at all.
 
 const DEADZONE = 0.18;
 
@@ -37,20 +38,17 @@ export class InputSource {
     return false;
   }
 
-  /** @returns {{dx:number, dy:number, mouthHeld:boolean, eyesState:'forward'|'side'|'blink', gamepadConnected:boolean}} */
+  /** @returns {{dx:number, dy:number, mouthHeld:boolean, gamepadConnected:boolean}} */
   sample() {
     let dx = 0;
     let dy = 0;
     let mouthHeld = false;
-    let eyesState = 'forward';
 
     if (this.keys.has('ArrowLeft') || this.keys.has('KeyA')) dx -= 1;
     if (this.keys.has('ArrowRight') || this.keys.has('KeyD')) dx += 1;
     if (this.keys.has('ArrowUp') || this.keys.has('KeyW')) dy -= 1;
     if (this.keys.has('ArrowDown') || this.keys.has('KeyS')) dy += 1;
     if (this.keys.has('Space')) mouthHeld = true;
-    if (this.keys.has('ShiftLeft') || this.keys.has('ShiftRight')) eyesState = 'side';
-    if (this.keys.has('KeyB')) eyesState = 'blink';
 
     let gamepadConnected = false;
     if (navigator.getGamepads) {
@@ -67,14 +65,12 @@ export class InputSource {
         if (pad.buttons[13]?.pressed) dy += 1;
         if (pad.buttons[0]?.pressed) mouthHeld = true;
         if (pad.buttons[7]?.value > 0.3 || pad.buttons[7]?.pressed) mouthHeld = true;
-        if (pad.buttons[2]?.pressed) eyesState = 'side';
-        if (pad.buttons[1]?.pressed) eyesState = 'blink';
         break; // use the first connected pad
       }
     }
 
     dx = Math.max(-1, Math.min(1, dx));
     dy = Math.max(-1, Math.min(1, dy));
-    return { dx, dy, mouthHeld, eyesState, gamepadConnected };
+    return { dx, dy, mouthHeld, gamepadConnected };
   }
 }

@@ -1,15 +1,18 @@
-import { getRecord, getAll } from '../db.js';
+import { getRecord, getAll, getAssetUrl } from '../db.js';
 import { navigate } from '../main.js';
 import { SceneRuntime } from '../engine/scene.js';
 import { sampleTrackAt, sceneDuration } from '../engine/recorder.js';
+import { decodeAudioBuffer } from '../engine/audio.js';
 
 const RESOLUTIONS = {
   '720p': { w: 1280, h: 720 },
   '1080p': { w: 1920, h: 1080 },
 };
 
-function pickMimeType() {
-  const candidates = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+function pickMimeType(withAudio) {
+  const candidates = withAudio
+    ? ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
+    : ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
   for (const type of candidates) {
     if (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(type)) return type;
   }
@@ -31,6 +34,8 @@ export async function render(root, params) {
   let rafHandle = null;
   let mediaRecorder = null;
   let downloadUrl = null;
+  let audioCtx = null;
+  let audioSource = null;
 
   root.innerHTML = `
     <div class="row between">
@@ -100,21 +105,53 @@ export async function render(root, params) {
     return track ? sampleTrackAt(track, t) : null;
   }
 
-  startBtn.addEventListener('click', () => {
+  function stopAudioSource() {
+    if (audioSource) {
+      try {
+        audioSource.stop();
+      } catch {
+        /* already stopped */
+      }
+      audioSource = null;
+    }
+    if (audioCtx) {
+      audioCtx.close();
+      audioCtx = null;
+    }
+  }
+
+  startBtn.addEventListener('click', async () => {
     const { w, h } = RESOLUTIONS[resSelect.value];
     const fps = parseInt(fpsSelect.value, 10);
     canvas.width = w;
     canvas.height = h;
     runtime = new SceneRuntime(scene, characterById, objectById);
 
-    const stream = canvas.captureStream(fps);
-    const mimeType = pickMimeType();
+    const videoStream = canvas.captureStream(fps);
+    const tracks = [...videoStream.getVideoTracks()];
+    const hasAudio = !!scene.dialogueAudio;
+
+    if (hasAudio) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const url = await getAssetUrl(scene.dialogueAudio.assetId);
+      const arrayBuffer = await (await fetch(url)).arrayBuffer();
+      const buffer = await audioCtx.decodeAudioData(arrayBuffer);
+      audioSource = audioCtx.createBufferSource();
+      audioSource.buffer = buffer;
+      const dest = audioCtx.createMediaStreamDestination();
+      audioSource.connect(dest);
+      tracks.push(...dest.stream.getAudioTracks());
+    }
+
+    const combinedStream = new MediaStream(tracks);
+    const mimeType = pickMimeType(hasAudio);
     const chunks = [];
-    mediaRecorder = new MediaRecorder(stream, { mimeType });
+    mediaRecorder = new MediaRecorder(combinedStream, { mimeType });
     mediaRecorder.ondataavailable = (e) => {
       if (e.data && e.data.size > 0) chunks.push(e.data);
     };
     mediaRecorder.onstop = () => {
+      stopAudioSource();
       const blob = new Blob(chunks, { type: mimeType });
       if (downloadUrl) URL.revokeObjectURL(downloadUrl);
       downloadUrl = URL.createObjectURL(blob);
@@ -134,6 +171,7 @@ export async function render(root, params) {
     resSelect.disabled = true;
     fpsSelect.disabled = true;
     downloadArea.innerHTML = '';
+    if (audioSource) audioSource.start(0);
     mediaRecorder.start();
 
     let sceneTime = 0;
@@ -163,6 +201,7 @@ export async function render(root, params) {
     if (rafHandle) cancelAnimationFrame(rafHandle);
     rafHandle = null;
     if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+    else stopAudioSource();
     startBtn.disabled = false;
     cancelBtn.disabled = true;
     resSelect.disabled = false;
@@ -173,6 +212,7 @@ export async function render(root, params) {
   return () => {
     if (rafHandle) cancelAnimationFrame(rafHandle);
     if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+    stopAudioSource();
     if (downloadUrl) URL.revokeObjectURL(downloadUrl);
   };
 }

@@ -1,8 +1,9 @@
-import { getRecord, putRecord, getAll } from '../db.js';
+import { getRecord, putRecord, getAll, importAssetFile, getAssetUrl } from '../db.js';
 import { navigate } from '../main.js';
 import { SceneRuntime, STAGE_WIDTH, STAGE_HEIGHT } from '../engine/scene.js';
 import { InputSource } from '../engine/input.js';
 import { TrackRecorder, sampleTrackAt, sceneDuration } from '../engine/recorder.js';
+import { decodeAudioBuffer, computeWaveformPeaks, drawWaveform } from '../engine/audio.js';
 
 export async function render(root, params) {
   const sceneId = params.id;
@@ -36,6 +37,8 @@ export async function render(root, params) {
   let rafHandle = null;
   let lastTs = null;
   let gpInterval = null;
+  const dialogueAudioEl = new Audio();
+  dialogueAudioEl.preload = 'auto';
 
   root.innerHTML = `
     <div class="row between">
@@ -48,6 +51,18 @@ export async function render(root, params) {
     <div class="puppet-layout">
       <div class="stack">
         <div class="stage-wrap"><canvas id="stage" width="${STAGE_WIDTH}" height="${STAGE_HEIGHT}"></canvas></div>
+        <div class="panel">
+          <div class="row between">
+            <strong>Dialogue audio</strong>
+            <div class="row">
+              <button class="btn small" id="import-audio-btn">Import audio</button>
+              <button class="btn small danger icon-only" id="remove-audio-btn" title="Remove audio" style="display:none;">✕</button>
+            </div>
+          </div>
+          <canvas id="waveform-canvas" width="1000" height="40" style="width:100%;height:40px;display:block;margin-top:8px;background:#fafafa;border:2px solid var(--border);border-radius:8px;"></canvas>
+          <div id="audio-label" style="font-size:0.75rem;color:var(--ink-soft);margin-top:4px;">No dialogue audio imported yet.</div>
+          <input type="file" id="audio-file-input" accept="audio/*" style="display:none" />
+        </div>
         <div class="panel">
           <h2 style="margin-top:0">Timeline</h2>
           <div class="timeline-track" id="timeline">
@@ -68,8 +83,7 @@ export async function render(root, params) {
         <div class="dpad-help">
           Move: <span class="kbd">arrow keys</span> / <span class="kbd">WASD</span> or stick / d-pad<br/>
           Talk (hold): <span class="kbd">Space</span> or face button A / right trigger<br/>
-          Look sideways (hold): <span class="kbd">Shift</span> or face button X<br/>
-          Blink (hold): <span class="kbd">B</span> key or face button B
+          <em>Eye direction and blinking are automatic.</em>
         </div>
         <h2>Who's up?</h2>
         <select id="armed-select"></select>
@@ -95,6 +109,12 @@ export async function render(root, params) {
   const timelinePlayhead = root.querySelector('#timeline-playhead');
   const timelineEl = root.querySelector('#timeline');
   const perTrackList = root.querySelector('#per-track-list');
+  const importAudioBtn = root.querySelector('#import-audio-btn');
+  const removeAudioBtn = root.querySelector('#remove-audio-btn');
+  const audioFileInput = root.querySelector('#audio-file-input');
+  const waveformCanvas = root.querySelector('#waveform-canvas');
+  const waveformCtx = waveformCanvas.getContext('2d');
+  const audioLabel = root.querySelector('#audio-label');
 
   function refreshArmedSelect() {
     armedSelect.innerHTML = characterEntities
@@ -119,8 +139,60 @@ export async function render(root, params) {
     }
   }
 
+  async function refreshAudioUI() {
+    if (scene.dialogueAudio) {
+      const url = await getAssetUrl(scene.dialogueAudio.assetId);
+      dialogueAudioEl.src = url;
+      removeAudioBtn.style.display = '';
+      audioLabel.textContent = `${scene.dialogueAudio.duration.toFixed(1)}s imported — this sets the overall scene length.`;
+      try {
+        const buffer = await decodeAudioBuffer(url);
+        const peaks = computeWaveformPeaks(buffer, 300);
+        drawWaveform(waveformCtx, peaks, waveformCanvas.width, waveformCanvas.height);
+      } catch (err) {
+        console.error('Failed to decode dialogue audio for waveform', err);
+      }
+    } else {
+      dialogueAudioEl.removeAttribute('src');
+      removeAudioBtn.style.display = 'none';
+      audioLabel.textContent = 'No dialogue audio imported yet.';
+      waveformCtx.clearRect(0, 0, waveformCanvas.width, waveformCanvas.height);
+    }
+  }
+
+  importAudioBtn.addEventListener('click', () => audioFileInput.click());
+  audioFileInput.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const asset = await importAssetFile(file);
+    const url = await getAssetUrl(asset.id);
+    let duration = 0;
+    try {
+      const buffer = await decodeAudioBuffer(url);
+      duration = buffer.duration;
+    } catch (err) {
+      alert("Couldn't read that audio file. Try a different format (MP3/WAV/OGG).");
+      return;
+    }
+    scene.dialogueAudio = { assetId: asset.id, duration };
+    scene.updatedAt = Date.now();
+    await putRecord('scenes', scene);
+    await refreshAudioUI();
+    refreshTrackList();
+    audioFileInput.value = '';
+  });
+  removeAudioBtn.addEventListener('click', async () => {
+    if (!confirm('Remove the imported dialogue audio from this scene?')) return;
+    scene.dialogueAudio = null;
+    scene.updatedAt = Date.now();
+    await putRecord('scenes', scene);
+    await refreshAudioUI();
+    refreshTrackList();
+  });
+
   refreshArmedSelect();
   refreshTrackList();
+  await refreshAudioUI();
 
   armedSelect.addEventListener('change', () => {
     armedEntityId = armedSelect.value;
@@ -153,6 +225,13 @@ export async function render(root, params) {
     lastTs = null;
   }
 
+  function syncAudioToTime(t, shouldPlay) {
+    if (!scene.dialogueAudio) return;
+    if (Math.abs(dialogueAudioEl.currentTime - t) > 0.15) dialogueAudioEl.currentTime = t;
+    if (shouldPlay) dialogueAudioEl.play().catch(() => {});
+    else dialogueAudioEl.pause();
+  }
+
   function loop(ts) {
     if (lastTs == null) lastTs = ts;
     const dt = Math.min(0.1, (ts - lastTs) / 1000);
@@ -161,9 +240,9 @@ export async function render(root, params) {
     if (mode === 'recording') {
       sceneTime += dt;
       const sample = input.sample();
-      const { x, y } = recorder.step(sample.dx, sample.dy, dt, sample.mouthHeld, sample.eyesState);
+      const { x, y } = recorder.step(sample.dx, sample.dy, dt, sample.mouthHeld);
       runtime.render(ctx, dt, (entityId) => {
-        if (entityId === armedEntityId) return { x, y, mouthHeld: sample.mouthHeld, eyesState: sample.eyesState };
+        if (entityId === armedEntityId) return { x, y, mouthHeld: sample.mouthHeld };
         const track = scene.tracks[entityId];
         return track ? sampleTrackAt(track, sceneTime) : null;
       }, armedEntityId);
@@ -180,6 +259,7 @@ export async function render(root, params) {
           return track ? sampleTrackAt(track, sceneTime) : null;
         });
         updatePlayhead(sceneTime);
+        dialogueAudioEl.pause();
         mode = 'idle';
         return;
       }
@@ -204,12 +284,14 @@ export async function render(root, params) {
     stopBtn.disabled = false;
     recordStatus.innerHTML = `<div class="status-line"><span class="dot-indicator rec"></span> Recording ${escapeHtml(entity.name)}…</div>`;
     stopLoop();
+    syncAudioToTime(0, true);
     rafHandle = requestAnimationFrame(loop);
   });
 
   stopBtn.addEventListener('click', async () => {
     if (mode !== 'recording') return;
     stopLoop();
+    dialogueAudioEl.pause();
     const track = recorder.finish();
     scene.tracks[armedEntityId] = track;
     scene.updatedAt = Date.now();
@@ -233,17 +315,21 @@ export async function render(root, params) {
     mode = 'previewing';
     sceneTime = 0;
     stopLoop();
+    syncAudioToTime(0, true);
     rafHandle = requestAnimationFrame(loop);
   });
   root.querySelector('#pause-btn').addEventListener('click', () => {
     if (mode !== 'previewing') return;
     stopLoop();
+    dialogueAudioEl.pause();
     mode = 'idle';
   });
   root.querySelector('#restart-btn').addEventListener('click', () => {
     stopLoop();
+    dialogueAudioEl.pause();
     mode = 'idle';
     sceneTime = 0;
+    syncAudioToTime(0, false);
     drawStatic(0);
   });
 
@@ -253,6 +339,7 @@ export async function render(root, params) {
     const frac = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
     const maxDuration = Math.max(sceneDuration(scene), 0.001);
     sceneTime = frac * maxDuration;
+    syncAudioToTime(sceneTime, false);
     drawStatic(sceneTime);
   });
 
@@ -270,6 +357,7 @@ export async function render(root, params) {
     stopLoop();
     if (gpInterval) clearInterval(gpInterval);
     input.dispose();
+    dialogueAudioEl.pause();
   };
 }
 
