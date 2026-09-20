@@ -2,6 +2,7 @@
 // IndexedDB on first run, and creates a starter scene so the app is usable
 // with zero uploads. Uses fixed ids so this is idempotent across reloads.
 import { importAssetFromUrl, putRecord, getRecord, getAll } from './db.js';
+import { REF_WIDTH, REF_HEIGHT } from './engine/coords.js';
 
 const BASE = 'assets/samples/';
 
@@ -98,6 +99,26 @@ export async function seedSampleContent() {
       tracks: {},
     };
     await putRecord('scenes', scene);
+  }
+}
+
+// One-time fixup for browsers that had scenes saved before entity positions
+// switched from normalized 0..1 coordinates to absolute reference-space
+// pixels. A legitimate pixel position is always well above 2 (the smallest
+// is the ~0.02*REF_WIDTH edge margin), so anything at or below that is
+// unambiguously a leftover normalized value from the old scheme.
+export async function migrateLegacyEntityCoordinates() {
+  const scenes = await getAll('scenes');
+  for (const scene of scenes) {
+    let changed = false;
+    for (const entity of scene.entities || []) {
+      if (entity.x <= 2 && entity.y <= 2) {
+        entity.x *= REF_WIDTH;
+        entity.y *= REF_HEIGHT;
+        changed = true;
+      }
+    }
+    if (changed) await putRecord('scenes', scene);
   }
 }
 
