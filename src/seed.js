@@ -1,4 +1,4 @@
-// Seeds the bundled sample assets (background + one 3-layer character) into
+// Seeds the bundled sample assets (background + starter characters) into
 // IndexedDB on first run, and creates a starter scene so the app is usable
 // with zero uploads. Uses fixed ids so this is idempotent across reloads.
 import { importAssetFromUrl, putRecord, getRecord, getAll } from './db.js';
@@ -6,16 +6,42 @@ import { REF_WIDTH, REF_HEIGHT } from './engine/coords.js';
 
 const BASE = 'assets/samples/';
 
-const SAMPLE_IDS = {
-  background: 'sample-asset-background',
-  bodyIdle: 'sample-asset-body-idle',
-  bodyTalk: ['sample-asset-body-talk-0', 'sample-asset-body-talk-1', 'sample-asset-body-talk-2', 'sample-asset-body-talk-3'],
-  mouthSilent: 'sample-asset-mouth-silent',
-  mouthTalk: Array.from({ length: 8 }, (_, i) => `sample-asset-mouth-talk-${i}`),
-  eyesForward: 'sample-asset-eyes-forward',
-  eyesSide: 'sample-asset-eyes-side',
-  eyesBlink: 'sample-asset-eyes-blink',
-};
+// Every bundled character shares this same three-layer shape (idle + 4-frame
+// body cycle, silent + 8-frame mouth cycle, forward/side/blink eyes), so one
+// spec per character is enough to seed all of them identically.
+const BUNDLED_CHARACTERS = [
+  {
+    // Internal id kept as-is from before the character was renamed to
+    // "Bruce" — it's an opaque key, not a display name, and changing it
+    // would orphan data already saved by existing browsers.
+    id: 'sample-character-buddy',
+    name: 'Bruce',
+    assetPrefix: 'sample-asset',
+    localFolder: 'bruce',
+    entityId: 'entity-buddy-1',
+  },
+  {
+    id: 'sample-character-reggie',
+    name: 'Reggie',
+    assetPrefix: 'reggie-asset',
+    localFolder: 'reggie',
+    entityId: null, // not placed in the starter scene by default
+  },
+];
+
+function characterAssetIds(prefix) {
+  return {
+    bodyIdle: `${prefix}-body-idle`,
+    bodyTalk: Array.from({ length: 4 }, (_, i) => `${prefix}-body-talk-${i}`),
+    mouthSilent: `${prefix}-mouth-silent`,
+    mouthTalk: Array.from({ length: 8 }, (_, i) => `${prefix}-mouth-talk-${i}`),
+    eyesForward: `${prefix}-eyes-forward`,
+    eyesSide: `${prefix}-eyes-side`,
+    eyesBlink: `${prefix}-eyes-blink`,
+  };
+}
+
+const BACKGROUND_ASSET_ID = 'sample-asset-background';
 
 // Shared effect graphics used for every character in every scene (not part
 // of any one character's own layers), uploaded via the `assets` branch.
@@ -24,80 +50,91 @@ export const FX_ASSET_IDS = {
   bubble: ['fx-asset-bubble-0', 'fx-asset-bubble-1', 'fx-asset-bubble-2', 'fx-asset-bubble-3'],
 };
 
-export const SAMPLE_CHARACTER_ID = 'sample-character-buddy';
+export const SAMPLE_CHARACTER_ID = BUNDLED_CHARACTERS[0].id;
 export const SAMPLE_SCENE_ID = 'sample-scene-starter';
-// The internal id above is left alone (it's just an opaque key, and renaming
-// it would orphan existing browsers' saved data) — this is the display name.
-const SAMPLE_CHARACTER_NAME = 'Bruce';
 
 async function ensureAsset(id, name, path) {
   return importAssetFromUrl(BASE + path, name, id);
 }
 
+async function seedCharacterAssets(spec) {
+  const ids = characterAssetIds(spec.assetPrefix);
+  const folder = spec.localFolder;
+  await Promise.all([
+    ensureAsset(ids.bodyIdle, `${spec.name} - body idle`, `${folder}/body/idle.png`),
+    ensureAsset(ids.bodyTalk[0], `${spec.name} - body move 1`, `${folder}/body/talking-000.png`),
+    ensureAsset(ids.bodyTalk[1], `${spec.name} - body move 2`, `${folder}/body/talking-001.png`),
+    ensureAsset(ids.bodyTalk[2], `${spec.name} - body move 3`, `${folder}/body/talking-002.png`),
+    ensureAsset(ids.bodyTalk[3], `${spec.name} - body move 4`, `${folder}/body/talking-003.png`),
+    ensureAsset(ids.mouthSilent, `${spec.name} - mouth silent`, `${folder}/mouth/silent.png`),
+    ...ids.mouthTalk.map((id, i) =>
+      ensureAsset(id, `${spec.name} - mouth talk ${i + 1}`, `${folder}/mouth/talking-${String(i).padStart(3, '0')}.png`)
+    ),
+    ensureAsset(ids.eyesForward, `${spec.name} - eyes forward`, `${folder}/eyes/open.png`),
+    ensureAsset(ids.eyesSide, `${spec.name} - eyes side`, `${folder}/eyes/side.png`),
+    ensureAsset(ids.eyesBlink, `${spec.name} - eyes blink`, `${folder}/eyes/blink.png`),
+  ]);
+  return ids;
+}
+
+async function seedCharacterRecord(spec, assetIds) {
+  const existing = await getRecord('characters', spec.id);
+  if (existing) return;
+  const f = (assetId, label) => ({ id: `f_${assetId}`, label, assetId });
+  const bodyIdleFrame = f(assetIds.bodyIdle, 'Idle');
+  const bodyCycleFrames = assetIds.bodyTalk.map((id, i) => f(id, `Move ${i + 1}`));
+  const mouthSilentFrame = f(assetIds.mouthSilent, 'Silent');
+  const mouthTalkFrames = assetIds.mouthTalk.map((id, i) => f(id, `Talk ${i + 1}`));
+  const eyesForwardFrame = f(assetIds.eyesForward, 'Forward');
+  const eyesSideFrame = f(assetIds.eyesSide, 'Side');
+  const eyesBlinkFrame = f(assetIds.eyesBlink, 'Blink');
+
+  const character = {
+    id: spec.id,
+    name: spec.name,
+    createdAt: Date.now(),
+    layers: {
+      body: {
+        frames: [bodyIdleFrame, ...bodyCycleFrames],
+        roles: { idle: bodyIdleFrame.id, cycle: bodyCycleFrames.map((fr) => fr.id) },
+      },
+      mouth: {
+        frames: [mouthSilentFrame, ...mouthTalkFrames],
+        roles: { silent: mouthSilentFrame.id, talk: mouthTalkFrames.map((fr) => fr.id) },
+      },
+      eyes: {
+        frames: [eyesForwardFrame, eyesSideFrame, eyesBlinkFrame],
+        roles: { forward: eyesForwardFrame.id, side: eyesSideFrame.id, blink: eyesBlinkFrame.id },
+      },
+    },
+  };
+  await putRecord('characters', character);
+}
+
 export async function seedSampleContent() {
   await Promise.all([
-    ensureAsset(SAMPLE_IDS.background, 'Roadside background', 'background.png'),
-    ensureAsset(SAMPLE_IDS.bodyIdle, 'Body - idle', 'bruce/body/idle.png'),
-    ensureAsset(SAMPLE_IDS.bodyTalk[0], 'Body - move 1', 'bruce/body/talking-000.png'),
-    ensureAsset(SAMPLE_IDS.bodyTalk[1], 'Body - move 2', 'bruce/body/talking-001.png'),
-    ensureAsset(SAMPLE_IDS.bodyTalk[2], 'Body - move 3', 'bruce/body/talking-002.png'),
-    ensureAsset(SAMPLE_IDS.bodyTalk[3], 'Body - move 4', 'bruce/body/talking-003.png'),
-    ensureAsset(SAMPLE_IDS.mouthSilent, 'Mouth - silent', 'bruce/mouth/silent.png'),
-    ...SAMPLE_IDS.mouthTalk.map((id, i) =>
-      ensureAsset(id, `Mouth - talk ${i + 1}`, `bruce/mouth/talking-${String(i).padStart(3, '0')}.png`)
-    ),
-    ensureAsset(SAMPLE_IDS.eyesForward, 'Eyes - forward', 'bruce/eyes/open.png'),
-    ensureAsset(SAMPLE_IDS.eyesSide, 'Eyes - side', 'bruce/eyes/side.png'),
-    ensureAsset(SAMPLE_IDS.eyesBlink, 'Eyes - blink', 'bruce/eyes/blink.png'),
+    ensureAsset(BACKGROUND_ASSET_ID, 'Roadside background', 'background.png'),
     ensureAsset(FX_ASSET_IDS.shadow, 'Character shadow', 'fx/shadow.png'),
     ensureAsset(FX_ASSET_IDS.bubble[0], 'Speech bubble 1', 'fx/speech-bubble-000.png'),
     ensureAsset(FX_ASSET_IDS.bubble[1], 'Speech bubble 2', 'fx/speech-bubble-001.png'),
     ensureAsset(FX_ASSET_IDS.bubble[2], 'Speech bubble 3', 'fx/speech-bubble-002.png'),
     ensureAsset(FX_ASSET_IDS.bubble[3], 'Speech bubble 4', 'fx/speech-bubble-003.png'),
+    ...BUNDLED_CHARACTERS.map(async (spec) => {
+      const assetIds = await seedCharacterAssets(spec);
+      await seedCharacterRecord(spec, assetIds);
+    }),
   ]);
-
-  const existingChar = await getRecord('characters', SAMPLE_CHARACTER_ID);
-  if (!existingChar) {
-    const f = (assetId, label) => ({ id: `f_${assetId}`, label, assetId });
-    const bodyIdleFrame = f(SAMPLE_IDS.bodyIdle, 'Idle');
-    const bodyCycleFrames = SAMPLE_IDS.bodyTalk.map((id, i) => f(id, `Move ${i + 1}`));
-    const mouthSilentFrame = f(SAMPLE_IDS.mouthSilent, 'Silent');
-    const mouthTalkFrames = SAMPLE_IDS.mouthTalk.map((id, i) => f(id, `Talk ${i + 1}`));
-    const eyesForwardFrame = f(SAMPLE_IDS.eyesForward, 'Forward');
-    const eyesSideFrame = f(SAMPLE_IDS.eyesSide, 'Side');
-    const eyesBlinkFrame = f(SAMPLE_IDS.eyesBlink, 'Blink');
-
-    const character = {
-      id: SAMPLE_CHARACTER_ID,
-      name: SAMPLE_CHARACTER_NAME,
-      createdAt: Date.now(),
-      layers: {
-        body: {
-          frames: [bodyIdleFrame, ...bodyCycleFrames],
-          roles: { idle: bodyIdleFrame.id, cycle: bodyCycleFrames.map((fr) => fr.id) },
-        },
-        mouth: {
-          frames: [mouthSilentFrame, ...mouthTalkFrames],
-          roles: { silent: mouthSilentFrame.id, talk: mouthTalkFrames.map((fr) => fr.id) },
-        },
-        eyes: {
-          frames: [eyesForwardFrame, eyesSideFrame, eyesBlinkFrame],
-          roles: { forward: eyesForwardFrame.id, side: eyesSideFrame.id, blink: eyesBlinkFrame.id },
-        },
-      },
-    };
-    await putRecord('characters', character);
-  }
 
   const existingScene = await getRecord('scenes', SAMPLE_SCENE_ID);
   if (!existingScene) {
+    const starter = BUNDLED_CHARACTERS[0];
     const scene = {
       id: SAMPLE_SCENE_ID,
       name: 'My First Scene',
-      backgroundAssetId: SAMPLE_IDS.background,
+      backgroundAssetId: BACKGROUND_ASSET_ID,
       updatedAt: Date.now(),
       entities: [
-        { id: 'entity-buddy-1', kind: 'character', refId: SAMPLE_CHARACTER_ID, name: SAMPLE_CHARACTER_NAME, x: 768, y: 1037, scale: 0.34, z: 1 },
+        { id: starter.entityId, kind: 'character', refId: starter.id, name: starter.name, x: 768, y: 1037, scale: 0.34, z: 1 },
       ],
       tracks: {},
     };
@@ -125,26 +162,28 @@ export async function migrateLegacyEntityCoordinates() {
   }
 }
 
-// One-time fixup for browsers that already had the bundled sample character
-// saved under its old display name ("Buddy") before it was renamed to
-// "Bruce" — the seed step above only sets the name at creation time, so
+// One-time fixup for browsers that already had a bundled sample character
+// saved under an old display name (e.g. "Buddy" before it was renamed to
+// "Bruce") — the seed step above only sets the name at creation time, so
 // existing records need to be patched in place.
 export async function migrateLegacySampleCharacterName() {
-  const character = await getRecord('characters', SAMPLE_CHARACTER_ID);
-  if (character && character.name !== SAMPLE_CHARACTER_NAME) {
-    character.name = SAMPLE_CHARACTER_NAME;
-    await putRecord('characters', character);
-  }
   const scenes = await getAll('scenes');
-  for (const scene of scenes) {
-    let changed = false;
-    for (const entity of scene.entities || []) {
-      if (entity.refId === SAMPLE_CHARACTER_ID && entity.name !== SAMPLE_CHARACTER_NAME) {
-        entity.name = SAMPLE_CHARACTER_NAME;
-        changed = true;
-      }
+  for (const spec of BUNDLED_CHARACTERS) {
+    const character = await getRecord('characters', spec.id);
+    if (character && character.name !== spec.name) {
+      character.name = spec.name;
+      await putRecord('characters', character);
     }
-    if (changed) await putRecord('scenes', scene);
+    for (const scene of scenes) {
+      let changed = false;
+      for (const entity of scene.entities || []) {
+        if (entity.refId === spec.id && entity.name !== spec.name) {
+          entity.name = spec.name;
+          changed = true;
+        }
+      }
+      if (changed) await putRecord('scenes', scene);
+    }
   }
 }
 

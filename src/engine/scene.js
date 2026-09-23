@@ -1,8 +1,8 @@
 // Composites a background with any number of character/object entities onto
 // a canvas. Used identically by the scene editor (static preview), the
 // puppeteering view (live + played-back tracks), and video export.
-import { preloadImage, preloadMany, getCachedImage } from '../utils/image-cache.js';
-import { CharacterAnimState, resolvePoseAssets, preloadCharacterImages, drawCharacter } from './character.js';
+import { preloadImage, preloadMany, getCachedImage, getContentWidthFraction } from '../utils/image-cache.js';
+import { CharacterAnimState, resolvePoseAssets, preloadCharacterImages, drawCharacter, resolveIdleBodyAssetId } from './character.js';
 import { REF_WIDTH } from './coords.js';
 import { FX_ASSET_IDS } from '../seed.js';
 
@@ -21,6 +21,7 @@ export class SceneRuntime {
     this.objectById = objectById;
     this.animStates = new Map();
     this.fx = { shadowImg: null, bubbleFrames: [] };
+    this.shadowWidthFractionByCharacterId = new Map();
     for (const entity of scene.entities) {
       if (entity.kind === 'character') {
         this.animStates.set(entity.id, new CharacterAnimState(entity.x, entity.y));
@@ -44,6 +45,15 @@ export class SceneRuntime {
       shadowImg: getCachedImage(FX_ASSET_IDS.shadow),
       bubbleFrames: FX_ASSET_IDS.bubble.map((id) => getCachedImage(id)),
     };
+
+    // The shadow should match each character's actual (non-transparent) body
+    // width, measured once from their idle pose so it stays stable as the
+    // body cycles through talk frames.
+    for (const character of this.characterById.values()) {
+      if (this.shadowWidthFractionByCharacterId.has(character.id)) continue;
+      const idleImg = getCachedImage(resolveIdleBodyAssetId(character));
+      this.shadowWidthFractionByCharacterId.set(character.id, getContentWidthFraction(idleImg));
+    }
   }
 
   getAnimState(entityId) {
@@ -98,6 +108,7 @@ export class SceneRuntime {
             originX: x * scale,
             originY: y * scale,
             size,
+            shadowWidthFraction: this.shadowWidthFractionByCharacterId.get(character.id) ?? 1,
           },
           this.fx
         );

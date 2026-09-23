@@ -46,6 +46,15 @@ function frameAssetId(layer, frameId) {
   return frame ? frame.assetId : null;
 }
 
+/** The body asset used for a character's resting pose — used as the stable
+ * reference for sizing the shadow, so it doesn't resize as the body cycles
+ * through talk frames. */
+export function resolveIdleBodyAssetId(character) {
+  const body = character.layers?.body;
+  const idleFrameId = body?.roles?.idle ?? body?.frames?.[0]?.id ?? null;
+  return frameAssetId(body, idleFrameId);
+}
+
 /** Resolve which body/mouth/eyes asset should be showing right now. */
 export function resolvePoseAssets(character, { mouthHeld, talkClock, eyesLook, blinking }) {
   const body = character.layers?.body;
@@ -194,11 +203,13 @@ export class CharacterAnimState {
  * @param {CanvasRenderingContext2D} ctx
  * @param {CharacterAnimState} state
  * @param {{bodyAssetId:?string, mouthAssetId:?string, eyesAssetId:?string}} pose
- * @param {{originX:number, originY:number, size:number}} geom pixel-space placement (originY = ground/feet level)
+ * @param {{originX:number, originY:number, size:number, shadowWidthFraction?:number}} geom pixel-space
+ *   placement (originY = ground/feet level); shadowWidthFraction is the character's actual (non-transparent)
+ *   width as a fraction of `size`, so the shadow can match the character's real silhouette width.
  * @param {{shadowImg:?HTMLImageElement, bubbleFrames:HTMLImageElement[]}} fx shared effect images
  */
 export function drawCharacter(ctx, state, pose, geom, fx = {}) {
-  const { originX, originY, size } = geom;
+  const { originX, originY, size, shadowWidthFraction = 1 } = geom;
   const bodyImg = getCachedImage(pose.bodyAssetId);
   if (!bodyImg) return;
   const mouthImg = getCachedImage(pose.mouthAssetId);
@@ -207,7 +218,7 @@ export function drawCharacter(ctx, state, pose, geom, fx = {}) {
   // Shadow: stays on the ground under the feet, tracks position, ignores sway/bounce/flip.
   if (fx.shadowImg) {
     const shadowAspect = fx.shadowImg.width / fx.shadowImg.height || 4;
-    const shadowW = size * 0.62;
+    const shadowW = size * shadowWidthFraction;
     const shadowH = shadowW / shadowAspect;
     ctx.drawImage(fx.shadowImg, originX - shadowW / 2, originY - shadowH / 2, shadowW, shadowH);
   }
