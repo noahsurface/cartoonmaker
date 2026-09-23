@@ -6,13 +6,16 @@
 import { getCachedImage, preloadMany } from '../utils/image-cache.js';
 
 const FLIP_DURATION = 0.32; // seconds for a paper-flip turn
-const MAX_CYCLE_HZ = 2.2; // walk-cycle oscillation speed at full (500px/s) speed
+const SWAY_CYCLE_SECONDS = 0.75; // one full left-right-left sway cycle
+const SWAY_CYCLE_HZ = 1 / SWAY_CYCLE_SECONDS;
+// Bounce is abs(sin(walkPhase)), which has half the period of sin(walkPhase)
+// (sway) for free — one bump per half sway-revolution — giving exactly two
+// bounces per sway cycle (0.375s each) without a separate rate constant.
 const SWAY_DEGREES = 7; // feet-anchored tilt, alternating +/- this many degrees
-const BOUNCE_AMPLITUDE = 0.05; // fraction of character size
+const BOUNCE_AMPLITUDE = 0.067; // fraction of character height
 const MOVE_SPEED_EPS = 15; // px/sec below which we call it "stopped"
 const EYES_SIDE_EPS = 20; // px/sec of horizontal speed before eyes look sideways
-const CYCLE_FPS = 6; // body move-cycle frame rate
-const TALK_FPS = 10; // mouth talk-loop frame rate
+const TALK_FPS = 10; // mouth + body talk-loop frame rate
 const BUBBLE_FPS = 8; // speech bubble loop frame rate
 const BLINK_MIN_INTERVAL = 2; // seconds
 const BLINK_MAX_INTERVAL = 4; // seconds
@@ -44,20 +47,22 @@ function frameAssetId(layer, frameId) {
 }
 
 /** Resolve which body/mouth/eyes asset should be showing right now. */
-export function resolvePoseAssets(character, { moving, mouthHeld, poseClock, eyesLook, blinking }) {
+export function resolvePoseAssets(character, { mouthHeld, talkClock, eyesLook, blinking }) {
   const body = character.layers?.body;
   const mouth = character.layers?.mouth;
   const eyes = character.layers?.eyes;
 
+  // Body and mouth both cycle in lockstep while talking, at the same rate,
+  // driven by the same talk clock so they never fall out of sync.
   let bodyFrameId = body?.roles?.idle ?? body?.frames?.[0]?.id ?? null;
-  if (moving && body?.roles?.cycle?.length) {
-    const idx = Math.floor(poseClock * CYCLE_FPS) % body.roles.cycle.length;
+  if (mouthHeld && body?.roles?.cycle?.length) {
+    const idx = Math.floor(talkClock * TALK_FPS) % body.roles.cycle.length;
     bodyFrameId = body.roles.cycle[idx];
   }
 
   let mouthFrameId = mouth?.roles?.silent ?? null;
   if (mouthHeld && mouth?.roles?.talk?.length) {
-    const idx = Math.floor(poseClock * TALK_FPS) % mouth.roles.talk.length;
+    const idx = Math.floor(talkClock * TALK_FPS) % mouth.roles.talk.length;
     mouthFrameId = mouth.roles.talk[idx];
   } else if (mouthFrameId == null) {
     mouthFrameId = mouth?.frames?.[0]?.id ?? null;
@@ -91,7 +96,6 @@ export class CharacterAnimState {
     this.flipT = 1; // 1 = settled, not mid-flip
     this.walkPhase = 0;
     this.moving = false;
-    this.poseClock = 0;
     this.eyesLook = 'forward'; // 'forward' | 'side', driven by horizontal movement
     this.isBlinking = false;
     this.blinkTimer = randomBlinkInterval();
@@ -131,15 +135,12 @@ export class CharacterAnimState {
     }
 
     if (this.moving) {
-      const cycleHz = MAX_CYCLE_HZ * Math.min(1, speed / 500);
-      this.walkPhase += dt * cycleHz * Math.PI * 2;
-      this.poseClock += dt;
+      this.walkPhase += dt * SWAY_CYCLE_HZ * Math.PI * 2;
     } else {
       // Ease the phase back to the nearest resting point (upright, feet
       // together) so sway/bounce stop smoothly instead of freezing mid-step.
       const nearestRest = Math.round(this.walkPhase / (Math.PI * 2)) * Math.PI * 2;
       this.walkPhase += (nearestRest - this.walkPhase) * Math.min(1, dt * 12);
-      this.poseClock = 0;
     }
 
     // Random independent blinking, on top of whatever the eyes are otherwise doing.

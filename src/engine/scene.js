@@ -84,9 +84,8 @@ export class SceneRuntime {
         const y = sample ? sample.y : entity.y;
         state.update(x, y, dt, sample?.mouthHeld ?? false);
         const pose = resolvePoseAssets(character, {
-          moving: state.moving,
           mouthHeld: state.talking,
-          poseClock: state.poseClock,
+          talkClock: state.talkClock,
           eyesLook: state.eyesLook,
           blinking: state.isBlinking,
         });

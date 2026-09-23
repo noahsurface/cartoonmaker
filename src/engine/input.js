@@ -13,13 +13,24 @@
 
 const DEADZONE = 0.18;
 
+// These are the only keys this app reads, and all of them are keys the
+// browser itself binds to page scrolling by default — without preventDefault
+// here, puppeteering with the arrow keys/Space scrolls the page out from
+// under the stage.
+const CONTROLLED_KEYS = new Set([
+  'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
+  'KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space',
+]);
+
 export class InputSource {
   constructor() {
     this.keys = new Set();
     this._onKeyDown = (e) => {
+      if (CONTROLLED_KEYS.has(e.code)) e.preventDefault();
       this.keys.add(e.code);
     };
     this._onKeyUp = (e) => {
+      if (CONTROLLED_KEYS.has(e.code)) e.preventDefault();
       this.keys.delete(e.code);
     };
     window.addEventListener('keydown', this._onKeyDown);
