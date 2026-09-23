@@ -4,6 +4,7 @@
 // in both contexts: everything here derives purely from a position stream,
 // nothing is baked into the recorded track itself.
 import { getCachedImage, preloadMany } from '../utils/image-cache.js';
+import { REF_HEIGHT } from './coords.js';
 
 const FLIP_DURATION = 0.32; // seconds for a paper-flip turn
 const SWAY_CYCLE_SECONDS = 0.75; // one full left-right-left sway cycle
@@ -21,11 +22,15 @@ const BLINK_MIN_INTERVAL = 2; // seconds
 const BLINK_MAX_INTERVAL = 4; // seconds
 const BLINK_DURATION = 0.125; // seconds
 export const FEET_ANCHOR_Y = 0.82; // fraction down the 1200x1200 art where the feet sit
-// Speech bubble anchor, in reference-space pixels (2560x1440 — see engine/coords.js),
-// measured from the bottom of the character's feet. Converted to canvas pixels by
-// the caller (scene.js already knows the reference-to-canvas scale factor).
-export const BUBBLE_OFFSET_X_PX = 200;
-export const BUBBLE_OFFSET_Y_PX = 400;
+// Speech bubble anchor, expressed as a fraction of the character's own
+// rendered size (not a fixed pixel amount) so the bubble moves with the
+// character when it's scaled up or down. Calibrated so that at the default
+// add-to-scene size (entity.scale = 0.32, i.e. size = 0.32 * REF_HEIGHT) it
+// lands exactly 400px above / 200px to the right of the feet, as originally
+// specified — everything above/below that scale is proportional to it.
+const DEFAULT_CHARACTER_SCALE = 0.32;
+export const BUBBLE_OFFSET_X_FRACTION = 200 / (DEFAULT_CHARACTER_SCALE * REF_HEIGHT);
+export const BUBBLE_OFFSET_Y_FRACTION = 400 / (DEFAULT_CHARACTER_SCALE * REF_HEIGHT);
 
 function randomBlinkInterval() {
   return BLINK_MIN_INTERVAL + Math.random() * (BLINK_MAX_INTERVAL - BLINK_MIN_INTERVAL);
@@ -268,11 +273,12 @@ export function rectsOverlap(a, b) {
 
 /**
  * Geometry (+ current frame) for a talking character's speech bubble, or null
- * if it isn't talking. Centered `bubbleOffsetX` px right and `bubbleOffsetY`
- * px above the bottom of the character's feet (both already in canvas pixels
- * — scene.js converts from the reference-space BUBBLE_OFFSET_*_PX constants).
+ * if it isn't talking. Centered above/right of the bottom of the character's
+ * feet, both the offset and the bubble's own size scaling with the
+ * character's current rendered size (`geom.size`), so scaling the character
+ * up or down moves and resizes the bubble along with it.
  */
-export function getSpeechBubbleRect(state, geom, bubbleOffsetX, bubbleOffsetY, bubbleFrames) {
+export function getSpeechBubbleRect(state, geom, bubbleFrames) {
   if (!state.talking || !bubbleFrames?.length) return null;
   const img = bubbleFrames[state.bubbleFrameIndex % bubbleFrames.length];
   if (!img) return null;
@@ -280,8 +286,8 @@ export function getSpeechBubbleRect(state, geom, bubbleOffsetX, bubbleOffsetY, b
   const aspect = img.width / img.height || 1;
   const bw = bubbleSize * aspect;
   const bh = bubbleSize;
-  const centerX = geom.originX + bubbleOffsetX;
-  const centerY = feetPivotY(state, geom) - bubbleOffsetY;
+  const centerX = geom.originX + geom.size * BUBBLE_OFFSET_X_FRACTION;
+  const centerY = feetPivotY(state, geom) - geom.size * BUBBLE_OFFSET_Y_FRACTION;
   const left = centerX - bw / 2;
   const top = centerY - bh / 2;
   return { left, right: left + bw, top, bottom: top + bh, img };

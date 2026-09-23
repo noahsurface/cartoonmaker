@@ -126,6 +126,7 @@ export async function render(root, params) {
     canvas.width = w;
     canvas.height = h;
     runtime = new SceneRuntime(scene, characterById, objectById);
+    await runtime.preload();
 
     const videoStream = canvas.captureStream(fps);
     const tracks = [...videoStream.getVideoTracks()];

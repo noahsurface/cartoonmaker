@@ -12,8 +12,6 @@ import {
   getSpeechBubbleRect,
   drawSpeechBubbleRect,
   rectsOverlap,
-  BUBBLE_OFFSET_X_PX,
-  BUBBLE_OFFSET_Y_PX,
 } from './character.js';
 import { REF_WIDTH } from './coords.js';
 import { FX_ASSET_IDS } from '../seed.js';
@@ -34,6 +32,7 @@ export class SceneRuntime {
     this.animStates = new Map();
     this.fx = { shadowImg: null, bubbleFrames: [] };
     this.shadowWidthFractionByCharacterId = new Map();
+    this.shadowWidthFractionByObjectId = new Map();
     for (const entity of scene.entities) {
       if (entity.kind === 'character') {
         this.animStates.set(entity.id, new CharacterAnimState(entity.x, entity.y));
@@ -65,6 +64,10 @@ export class SceneRuntime {
       if (this.shadowWidthFractionByCharacterId.has(character.id)) continue;
       const idleImg = getCachedImage(resolveIdleBodyAssetId(character));
       this.shadowWidthFractionByCharacterId.set(character.id, getContentWidthFraction(idleImg));
+    }
+    for (const obj of this.objectById.values()) {
+      if (this.shadowWidthFractionByObjectId.has(obj.id)) continue;
+      this.shadowWidthFractionByObjectId.set(obj.id, getContentWidthFraction(getCachedImage(obj.assetId)));
     }
   }
 
@@ -156,6 +159,12 @@ export class SceneRuntime {
         const dh = size;
         const ox = x * scale;
         const oy = y * scale;
+        if (entity.hasShadow && this.fx.shadowImg) {
+          const shadowAspect = this.fx.shadowImg.width / this.fx.shadowImg.height || 4;
+          const shadowW = dw * (this.shadowWidthFractionByObjectId.get(obj.id) ?? 1);
+          const shadowH = shadowW / shadowAspect;
+          ctx.drawImage(this.fx.shadowImg, ox - shadowW / 2, oy - shadowH / 2, shadowW, shadowH);
+        }
         ctx.drawImage(img, ox - dw / 2, oy - dh, dw, dh);
         if (entity.id === highlightEntityId) {
           ctx.save();
@@ -170,10 +179,8 @@ export class SceneRuntime {
 
     // Pass 3: speech bubbles, always on top, dimmed to 50% while covering
     // another character so that character stays readable underneath.
-    const bubbleOffsetX = BUBBLE_OFFSET_X_PX * scale;
-    const bubbleOffsetY = BUBBLE_OFFSET_Y_PX * scale;
     for (const { entityId, state, geom } of talkers) {
-      const rect = getSpeechBubbleRect(state, geom, bubbleOffsetX, bubbleOffsetY, this.fx.bubbleFrames);
+      const rect = getSpeechBubbleRect(state, geom, this.fx.bubbleFrames);
       if (!rect) continue;
       const coversSomeoneElse = allCharacterBounds.some((b) => b.entityId !== entityId && rectsOverlap(rect, b.bounds));
       drawSpeechBubbleRect(ctx, rect, coversSomeoneElse ? 0.5 : 1);

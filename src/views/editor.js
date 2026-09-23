@@ -89,6 +89,7 @@ export async function render(root, params) {
       x: 1280,
       y: 1080,
       scale: 0.32,
+      baseScale: 0.32,
       z: nextZ(),
     };
     scene.entities.push(entity);
@@ -108,6 +109,8 @@ export async function render(root, params) {
       x: 1280,
       y: 1224,
       scale: 0.18,
+      baseScale: 0.18,
+      hasShadow: false,
       z: nextZ(),
     };
     scene.entities.push(entity);
@@ -155,9 +158,21 @@ export async function render(root, params) {
       el.innerHTML = '';
       return;
     }
+    // baseScale is "1x" for this entity — its scale when placed. Entities
+    // saved before this existed fall back to their current scale as 1x, so
+    // they don't jump in size the first time they're selected.
+    entity.baseScale = entity.baseScale || entity.scale;
+    const multiplier = entity.scale / entity.baseScale;
     el.innerHTML = `
       <div class="stack">
-        <label>Scale <input type="range" min="0.08" max="0.9" step="0.01" value="${entity.scale}" id="ent-scale" /></label>
+        <label>Scale <span id="scale-label">${formatMultiplier(multiplier)}</span>
+          <input type="range" min="0.5" max="4" step="0.5" value="${multiplier}" id="ent-scale" />
+        </label>
+        ${
+          entity.kind === 'object'
+            ? `<label class="row" style="gap:6px;"><input type="checkbox" id="ent-shadow" ${entity.hasShadow ? 'checked' : ''} /> Shadow</label>`
+            : ''
+        }
         <div class="row">
           <button class="btn small" id="ent-back">Send back</button>
           <button class="btn small" id="ent-front">Bring front</button>
@@ -166,7 +181,14 @@ export async function render(root, params) {
       </div>
     `;
     el.querySelector('#ent-scale').addEventListener('input', async (e) => {
-      entity.scale = parseFloat(e.target.value);
+      const m = parseFloat(e.target.value);
+      entity.scale = entity.baseScale * m;
+      el.querySelector('#scale-label').textContent = formatMultiplier(m);
+      await save();
+      drawFrame();
+    });
+    el.querySelector('#ent-shadow')?.addEventListener('change', async (e) => {
+      entity.hasShadow = e.target.checked;
       await save();
       drawFrame();
     });
@@ -275,4 +297,9 @@ function escapeHtml(str) {
   const div = document.createElement('div');
   div.textContent = str;
   return div.innerHTML;
+}
+
+function formatMultiplier(m) {
+  const rounded = Math.round(m * 10) / 10;
+  return `${Number.isInteger(rounded) ? rounded.toFixed(0) : rounded.toFixed(1)}x`;
 }
