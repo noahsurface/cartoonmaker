@@ -26,6 +26,9 @@ export const FX_ASSET_IDS = {
 
 export const SAMPLE_CHARACTER_ID = 'sample-character-buddy';
 export const SAMPLE_SCENE_ID = 'sample-scene-starter';
+// The internal id above is left alone (it's just an opaque key, and renaming
+// it would orphan existing browsers' saved data) — this is the display name.
+const SAMPLE_CHARACTER_NAME = 'Bruce';
 
 async function ensureAsset(id, name, path) {
   return importAssetFromUrl(BASE + path, name, id);
@@ -34,18 +37,18 @@ async function ensureAsset(id, name, path) {
 export async function seedSampleContent() {
   await Promise.all([
     ensureAsset(SAMPLE_IDS.background, 'Roadside background', 'background.png'),
-    ensureAsset(SAMPLE_IDS.bodyIdle, 'Body - idle', 'character/body/idle.png'),
-    ensureAsset(SAMPLE_IDS.bodyTalk[0], 'Body - move 1', 'character/body/talking-000.png'),
-    ensureAsset(SAMPLE_IDS.bodyTalk[1], 'Body - move 2', 'character/body/talking-001.png'),
-    ensureAsset(SAMPLE_IDS.bodyTalk[2], 'Body - move 3', 'character/body/talking-002.png'),
-    ensureAsset(SAMPLE_IDS.bodyTalk[3], 'Body - move 4', 'character/body/talking-003.png'),
-    ensureAsset(SAMPLE_IDS.mouthSilent, 'Mouth - silent', 'character/mouth/silent.png'),
+    ensureAsset(SAMPLE_IDS.bodyIdle, 'Body - idle', 'bruce/body/idle.png'),
+    ensureAsset(SAMPLE_IDS.bodyTalk[0], 'Body - move 1', 'bruce/body/talking-000.png'),
+    ensureAsset(SAMPLE_IDS.bodyTalk[1], 'Body - move 2', 'bruce/body/talking-001.png'),
+    ensureAsset(SAMPLE_IDS.bodyTalk[2], 'Body - move 3', 'bruce/body/talking-002.png'),
+    ensureAsset(SAMPLE_IDS.bodyTalk[3], 'Body - move 4', 'bruce/body/talking-003.png'),
+    ensureAsset(SAMPLE_IDS.mouthSilent, 'Mouth - silent', 'bruce/mouth/silent.png'),
     ...SAMPLE_IDS.mouthTalk.map((id, i) =>
-      ensureAsset(id, `Mouth - talk ${i + 1}`, `character/mouth/talking-${String(i).padStart(3, '0')}.png`)
+      ensureAsset(id, `Mouth - talk ${i + 1}`, `bruce/mouth/talking-${String(i).padStart(3, '0')}.png`)
     ),
-    ensureAsset(SAMPLE_IDS.eyesForward, 'Eyes - forward', 'character/eyes/open.png'),
-    ensureAsset(SAMPLE_IDS.eyesSide, 'Eyes - side', 'character/eyes/side.png'),
-    ensureAsset(SAMPLE_IDS.eyesBlink, 'Eyes - blink', 'character/eyes/blink.png'),
+    ensureAsset(SAMPLE_IDS.eyesForward, 'Eyes - forward', 'bruce/eyes/open.png'),
+    ensureAsset(SAMPLE_IDS.eyesSide, 'Eyes - side', 'bruce/eyes/side.png'),
+    ensureAsset(SAMPLE_IDS.eyesBlink, 'Eyes - blink', 'bruce/eyes/blink.png'),
     ensureAsset(FX_ASSET_IDS.shadow, 'Character shadow', 'fx/shadow.png'),
     ensureAsset(FX_ASSET_IDS.bubble[0], 'Speech bubble 1', 'fx/speech-bubble-000.png'),
     ensureAsset(FX_ASSET_IDS.bubble[1], 'Speech bubble 2', 'fx/speech-bubble-001.png'),
@@ -66,7 +69,7 @@ export async function seedSampleContent() {
 
     const character = {
       id: SAMPLE_CHARACTER_ID,
-      name: 'Buddy',
+      name: SAMPLE_CHARACTER_NAME,
       createdAt: Date.now(),
       layers: {
         body: {
@@ -94,7 +97,7 @@ export async function seedSampleContent() {
       backgroundAssetId: SAMPLE_IDS.background,
       updatedAt: Date.now(),
       entities: [
-        { id: 'entity-buddy-1', kind: 'character', refId: SAMPLE_CHARACTER_ID, name: 'Buddy', x: 768, y: 1037, scale: 0.34, z: 1 },
+        { id: 'entity-buddy-1', kind: 'character', refId: SAMPLE_CHARACTER_ID, name: SAMPLE_CHARACTER_NAME, x: 768, y: 1037, scale: 0.34, z: 1 },
       ],
       tracks: {},
     };
@@ -115,6 +118,29 @@ export async function migrateLegacyEntityCoordinates() {
       if (entity.x <= 2 && entity.y <= 2) {
         entity.x *= REF_WIDTH;
         entity.y *= REF_HEIGHT;
+        changed = true;
+      }
+    }
+    if (changed) await putRecord('scenes', scene);
+  }
+}
+
+// One-time fixup for browsers that already had the bundled sample character
+// saved under its old display name ("Buddy") before it was renamed to
+// "Bruce" — the seed step above only sets the name at creation time, so
+// existing records need to be patched in place.
+export async function migrateLegacySampleCharacterName() {
+  const character = await getRecord('characters', SAMPLE_CHARACTER_ID);
+  if (character && character.name !== SAMPLE_CHARACTER_NAME) {
+    character.name = SAMPLE_CHARACTER_NAME;
+    await putRecord('characters', character);
+  }
+  const scenes = await getAll('scenes');
+  for (const scene of scenes) {
+    let changed = false;
+    for (const entity of scene.entities || []) {
+      if (entity.refId === SAMPLE_CHARACTER_ID && entity.name !== SAMPLE_CHARACTER_NAME) {
+        entity.name = SAMPLE_CHARACTER_NAME;
         changed = true;
       }
     }

@@ -1,4 +1,4 @@
-import { seedSampleContent, migrateLegacyEntityCoordinates } from './seed.js';
+import { seedSampleContent, migrateLegacyEntityCoordinates, migrateLegacySampleCharacterName } from './seed.js';
 
 import * as homeView from './views/home.js';
 import * as assetsView from './views/assets.js';
@@ -118,6 +118,7 @@ async function boot() {
   try {
     await seedSampleContent();
     await migrateLegacyEntityCoordinates();
+    await migrateLegacySampleCharacterName();
   } catch (err) {
     console.error('Failed to seed sample content', err);
   }
