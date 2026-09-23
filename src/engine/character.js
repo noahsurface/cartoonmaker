@@ -21,6 +21,11 @@ const BLINK_MIN_INTERVAL = 2; // seconds
 const BLINK_MAX_INTERVAL = 4; // seconds
 const BLINK_DURATION = 0.125; // seconds
 export const FEET_ANCHOR_Y = 0.82; // fraction down the 1200x1200 art where the feet sit
+// Speech bubble anchor, in reference-space pixels (2560x1440 — see engine/coords.js),
+// measured from the bottom of the character's feet. Converted to canvas pixels by
+// the caller (scene.js already knows the reference-to-canvas scale factor).
+export const BUBBLE_OFFSET_X_PX = 200;
+export const BUBBLE_OFFSET_Y_PX = 400;
 
 function randomBlinkInterval() {
   return BLINK_MIN_INTERVAL + Math.random() * (BLINK_MAX_INTERVAL - BLINK_MIN_INTERVAL);
@@ -199,16 +204,19 @@ export class CharacterAnimState {
 }
 
 /**
- * Draw one character at its current animated state.
+ * Draw one character's shadow + body/mouth/eyes (no speech bubble — that's a
+ * separate pass in scene.js, drawn after every character's body so bubbles
+ * always sit on top, and so overlap against other characters can be tested
+ * before it's drawn).
  * @param {CanvasRenderingContext2D} ctx
  * @param {CharacterAnimState} state
  * @param {{bodyAssetId:?string, mouthAssetId:?string, eyesAssetId:?string}} pose
  * @param {{originX:number, originY:number, size:number, shadowWidthFraction?:number}} geom pixel-space
  *   placement (originY = ground/feet level); shadowWidthFraction is the character's actual (non-transparent)
  *   width as a fraction of `size`, so the shadow can match the character's real silhouette width.
- * @param {{shadowImg:?HTMLImageElement, bubbleFrames:HTMLImageElement[]}} fx shared effect images
+ * @param {{shadowImg:?HTMLImageElement}} fx shared effect images
  */
-export function drawCharacter(ctx, state, pose, geom, fx = {}) {
+export function drawCharacterBody(ctx, state, pose, geom, fx = {}) {
   const { originX, originY, size, shadowWidthFraction = 1 } = geom;
   const bodyImg = getCachedImage(pose.bodyAssetId);
   if (!bodyImg) return;
@@ -223,13 +231,10 @@ export function drawCharacter(ctx, state, pose, geom, fx = {}) {
     ctx.drawImage(fx.shadowImg, originX - shadowW / 2, originY - shadowH / 2, shadowW, shadowH);
   }
 
-  const bouncePx = state.bounceOffset * size;
-  const feetPivotY = originY - bouncePx;
-
   // Body/mouth/eyes: rotated together about the (bounced) feet pivot, so the
   // sway tilts the character while its feet stay anchored above the shadow.
   ctx.save();
-  ctx.translate(originX, feetPivotY);
+  ctx.translate(originX, feetPivotY(state, geom));
   ctx.rotate(state.swayAngle);
   ctx.scale(state.scaleX, 1);
   const half = size / 2;
@@ -238,19 +243,54 @@ export function drawCharacter(ctx, state, pose, geom, fx = {}) {
   if (mouthImg) ctx.drawImage(mouthImg, -half, top, size, size);
   if (eyesImg) ctx.drawImage(eyesImg, -half, top, size, size);
   ctx.restore();
+}
 
-  // Speech bubble: follows the character's position/bounce but stays upright
-  // (no sway rotation or facing-flip), anchored above and to the right of the head.
-  if (state.talking && fx.bubbleFrames?.length) {
-    const bubbleImg = fx.bubbleFrames[state.bubbleFrameIndex % fx.bubbleFrames.length];
-    if (bubbleImg) {
-      const bubbleSize = size * 0.5;
-      const aspect = bubbleImg.width / bubbleImg.height || 1;
-      const bw = bubbleSize * aspect;
-      const bh = bubbleSize;
-      const anchorX = originX + size * 0.18;
-      const anchorY = feetPivotY - size * FEET_ANCHOR_Y - size * 0.02;
-      ctx.drawImage(bubbleImg, anchorX, anchorY - bh, bw, bh);
-    }
-  }
+function feetPivotY(state, geom) {
+  return geom.originY - state.bounceOffset * geom.size;
+}
+
+/** Axis-aligned on-screen bounding box for a character, used for depth-sort
+ * ties and for testing whether another character's speech bubble overlaps it. */
+export function getCharacterBounds(state, geom) {
+  const { originX, size, shadowWidthFraction = 1 } = geom;
+  const halfWidth = (size * shadowWidthFraction) / 2;
+  return {
+    left: originX - halfWidth,
+    right: originX + halfWidth,
+    top: feetPivotY(state, geom) - size * FEET_ANCHOR_Y,
+    bottom: geom.originY,
+  };
+}
+
+export function rectsOverlap(a, b) {
+  return !(a.right < b.left || a.left > b.right || a.bottom < b.top || a.top > b.bottom);
+}
+
+/**
+ * Geometry (+ current frame) for a talking character's speech bubble, or null
+ * if it isn't talking. Centered `bubbleOffsetX` px right and `bubbleOffsetY`
+ * px above the bottom of the character's feet (both already in canvas pixels
+ * — scene.js converts from the reference-space BUBBLE_OFFSET_*_PX constants).
+ */
+export function getSpeechBubbleRect(state, geom, bubbleOffsetX, bubbleOffsetY, bubbleFrames) {
+  if (!state.talking || !bubbleFrames?.length) return null;
+  const img = bubbleFrames[state.bubbleFrameIndex % bubbleFrames.length];
+  if (!img) return null;
+  const bubbleSize = geom.size * 0.5;
+  const aspect = img.width / img.height || 1;
+  const bw = bubbleSize * aspect;
+  const bh = bubbleSize;
+  const centerX = geom.originX + bubbleOffsetX;
+  const centerY = feetPivotY(state, geom) - bubbleOffsetY;
+  const left = centerX - bw / 2;
+  const top = centerY - bh / 2;
+  return { left, right: left + bw, top, bottom: top + bh, img };
+}
+
+export function drawSpeechBubbleRect(ctx, rect, opacity = 1) {
+  if (!rect) return;
+  ctx.save();
+  ctx.globalAlpha = opacity;
+  ctx.drawImage(rect.img, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top);
+  ctx.restore();
 }
