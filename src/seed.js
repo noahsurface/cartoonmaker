@@ -43,6 +43,10 @@ function characterAssetIds(prefix) {
 
 const BACKGROUND_ASSET_ID = 'sample-asset-background';
 
+// Bundled default objects (props): simple, un-posed images placeable in any
+// scene, uploaded via the `assets` branch.
+const BUNDLED_OBJECTS = [{ id: 'sample-object-bush', name: 'Bush', assetId: 'sample-asset-bush', localPath: 'objects/bush.png' }];
+
 // Shared effect graphics used for every character in every scene (not part
 // of any one character's own layers), uploaded via the `assets` branch.
 export const FX_ASSET_IDS = {
@@ -111,6 +115,12 @@ async function seedCharacterRecord(spec, assetIds) {
   await putRecord('characters', character);
 }
 
+async function seedObjectRecord(spec) {
+  const existing = await getRecord('objects', spec.id);
+  if (existing) return;
+  await putRecord('objects', { id: spec.id, name: spec.name, assetId: spec.assetId, createdAt: Date.now() });
+}
+
 export async function seedSampleContent() {
   await Promise.all([
     ensureAsset(BACKGROUND_ASSET_ID, 'Roadside background', 'background.png'),
@@ -122,6 +132,10 @@ export async function seedSampleContent() {
     ...BUNDLED_CHARACTERS.map(async (spec) => {
       const assetIds = await seedCharacterAssets(spec);
       await seedCharacterRecord(spec, assetIds);
+    }),
+    ...BUNDLED_OBJECTS.map(async (spec) => {
+      await ensureAsset(spec.assetId, spec.name, spec.localPath);
+      await seedObjectRecord(spec);
     }),
   ]);
 
