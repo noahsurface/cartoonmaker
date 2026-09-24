@@ -4,9 +4,11 @@
 // app's own automated checks can exercise the puppeteering feature.
 //
 // Mapping (standard W3C gamepad layout):
-//   left stick / d-pad      -> move                | Arrow keys / WASD
-//   face button 0 (A/Cross) -> hold to talk (mouth) | Space
-//   right trigger (7)       -> hold to talk (mouth) | (no separate key)
+//   left stick / d-pad      -> move                     | Arrow keys / WASD
+//   face button 0 (A/Cross) -> hold to talk (mouth)      | Space
+//   right trigger (7)       -> hold to talk (mouth)      | (no separate key)
+//   left bumper (4)         -> step to previous pose     | [
+//   right bumper (5)        -> step to next pose         | ]
 //
 // Eye direction and blinking are fully automatic (see CharacterAnimState)
 // and have no input mapping at all.
@@ -20,14 +22,26 @@ const DEADZONE = 0.18;
 const CONTROLLED_KEYS = new Set([
   'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown',
   'KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space',
+  'BracketLeft', 'BracketRight',
 ]);
 
 export class InputSource {
   constructor() {
     this.keys = new Set();
+    // Pose-step is edge-triggered (one step per press), not level-based like
+    // movement/talk, so a press just increments a pending counter that
+    // sample() drains once per frame — this covers both the keyboard and
+    // (below) the gamepad bumpers, which have no native press event and must
+    // be diffed against their previous polled state instead.
+    this._pendingPoseStep = 0;
+    this._prevGpLB = false;
+    this._prevGpRB = false;
     this._onKeyDown = (e) => {
       if (CONTROLLED_KEYS.has(e.code)) e.preventDefault();
       this.keys.add(e.code);
+      if (e.repeat) return;
+      if (e.code === 'BracketLeft') this._pendingPoseStep -= 1;
+      else if (e.code === 'BracketRight') this._pendingPoseStep += 1;
     };
     this._onKeyUp = (e) => {
       if (CONTROLLED_KEYS.has(e.code)) e.preventDefault();
@@ -49,11 +63,13 @@ export class InputSource {
     return false;
   }
 
-  /** @returns {{dx:number, dy:number, mouthHeld:boolean, gamepadConnected:boolean}} */
+  /** @returns {{dx:number, dy:number, mouthHeld:boolean, gamepadConnected:boolean, poseStep:number}} */
   sample() {
     let dx = 0;
     let dy = 0;
     let mouthHeld = false;
+    let poseStep = this._pendingPoseStep;
+    this._pendingPoseStep = 0;
 
     if (this.keys.has('ArrowLeft') || this.keys.has('KeyA')) dx -= 1;
     if (this.keys.has('ArrowRight') || this.keys.has('KeyD')) dx += 1;
@@ -76,12 +92,21 @@ export class InputSource {
         if (pad.buttons[13]?.pressed) dy += 1;
         if (pad.buttons[0]?.pressed) mouthHeld = true;
         if (pad.buttons[7]?.value > 0.3 || pad.buttons[7]?.pressed) mouthHeld = true;
+        // Bumpers have no native press event, so a fresh press is detected
+        // by diffing against last frame's polled state (edge-triggered,
+        // same as the keyboard bracket keys above).
+        const lbPressed = !!pad.buttons[4]?.pressed;
+        const rbPressed = !!pad.buttons[5]?.pressed;
+        if (lbPressed && !this._prevGpLB) poseStep -= 1;
+        if (rbPressed && !this._prevGpRB) poseStep += 1;
+        this._prevGpLB = lbPressed;
+        this._prevGpRB = rbPressed;
         break; // use the first connected pad
       }
     }
 
     dx = Math.max(-1, Math.min(1, dx));
     dy = Math.max(-1, Math.min(1, dy));
-    return { dx, dy, mouthHeld, gamepadConnected };
+    return { dx, dy, mouthHeld, gamepadConnected, poseStep };
   }
 }

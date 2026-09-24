@@ -1,8 +1,8 @@
 import { getRecord, putRecord, getAll, uid } from '../db.js';
 import { navigate } from '../main.js';
 import { SceneRuntime, STAGE_WIDTH, STAGE_HEIGHT } from '../engine/scene.js';
-import { FEET_ANCHOR_Y } from '../engine/character.js';
-import { REF_WIDTH, clampToBounds } from '../engine/coords.js';
+import { FEET_ANCHOR_Y, getCharacterPoses } from '../engine/character.js';
+import { REF_WIDTH, REF_HEIGHT, clampToBounds, getWorldTransform } from '../engine/coords.js';
 import { getCachedImage } from '../utils/image-cache.js';
 import { pickAsset } from './asset-picker.js';
 
@@ -43,6 +43,9 @@ export async function render(root, params) {
           <select id="add-object-select"></select>
           <button class="btn" id="add-object-btn">+ Add object</button>
         </div>
+        <h2>Camera</h2>
+        <select id="camera-follow-select"></select>
+        <p style="font-size:0.75rem;color:var(--ink-soft);margin:0;">Only matters when the background is wider than the frame — the camera pans to follow this character.</p>
       </div>
       <div class="stack">
         <div class="stage-wrap">
@@ -70,6 +73,20 @@ export async function render(root, params) {
   const objSelect = root.querySelector('#add-object-select');
   objSelect.innerHTML = objects.map((o) => `<option value="${o.id}">${escapeHtml(o.name)}</option>`).join('') || '<option value="">(no objects yet)</option>';
 
+  const cameraSelect = root.querySelector('#camera-follow-select');
+  function refreshCameraSelect() {
+    const characterEntities = scene.entities.filter((e) => e.kind === 'character');
+    cameraSelect.innerHTML =
+      '<option value="">(static — no follow)</option>' +
+      characterEntities.map((e) => `<option value="${e.id}" ${e.id === scene.cameraFollowEntityId ? 'selected' : ''}>${escapeHtml(e.name)}</option>`).join('');
+  }
+  refreshCameraSelect();
+  cameraSelect.addEventListener('change', async () => {
+    scene.cameraFollowEntityId = cameraSelect.value || null;
+    await save();
+    drawFrame();
+  });
+
   root.querySelector('#pick-bg').addEventListener('click', async () => {
     const asset = await pickAsset();
     if (!asset) return;
@@ -81,20 +98,24 @@ export async function render(root, params) {
   root.querySelector('#add-character-btn').addEventListener('click', async () => {
     const charId = charSelect.value;
     if (!charId) return alert('Create a character first, in the Characters tab.');
+    const character = characterById.get(charId);
+    const { order } = getCharacterPoses(character || {});
     const entity = {
       id: uid('entity'),
       kind: 'character',
       refId: charId,
-      name: characterById.get(charId)?.name || 'Character',
+      name: character?.name || 'Character',
       x: 1280,
       y: 1080,
       scale: 0.32,
       baseScale: 0.32,
+      poseSequence: [order[0]],
       z: nextZ(),
     };
     scene.entities.push(entity);
     await save();
     await rebuildRuntime();
+    refreshCameraSelect();
     selectEntity(entity.id);
   });
 
@@ -173,6 +194,7 @@ export async function render(root, params) {
             ? `<label class="row" style="gap:6px;"><input type="checkbox" id="ent-shadow" ${entity.hasShadow ? 'checked' : ''} /> Shadow</label>`
             : ''
         }
+        ${entity.kind === 'character' ? '<div id="pose-sequence-editor"></div>' : ''}
         <div class="row">
           <button class="btn small" id="ent-back">Send back</button>
           <button class="btn small" id="ent-front">Bring front</button>
@@ -192,6 +214,7 @@ export async function render(root, params) {
       await save();
       drawFrame();
     });
+    if (entity.kind === 'character') renderPoseSequenceEditor(entity);
     el.querySelector('#ent-back').addEventListener('click', async () => {
       const minZ = Math.min(...scene.entities.map((e) => e.z ?? 0));
       entity.z = minZ - 1;
@@ -208,10 +231,60 @@ export async function render(root, params) {
     el.querySelector('#ent-del').addEventListener('click', async () => {
       scene.entities = scene.entities.filter((e) => e.id !== entity.id);
       delete scene.tracks[entity.id];
+      if (scene.cameraFollowEntityId === entity.id) scene.cameraFollowEntityId = null;
       selectedEntityId = null;
       await save();
       await rebuildRuntime();
+      refreshCameraSelect();
     });
+  }
+
+  // The character's poses stepped through with LB/RB (or [ / ]) while
+  // recording, in order, wrapping back to the start — built here as an
+  // append-from-palette + remove-by-chip list rather than free reordering,
+  // which covers the common case (an ordered, possibly-repeating loop like
+  // idle -> hands-up -> idle -> running -> idle) with much less UI.
+  function renderPoseSequenceEditor(entity) {
+    const el = root.querySelector('#pose-sequence-editor');
+    if (!el) return;
+    const character = characterById.get(entity.refId);
+    const { poses, order } = getCharacterPoses(character || {});
+    if (!entity.poseSequence || entity.poseSequence.length === 0) entity.poseSequence = [order[0]];
+
+    el.innerHTML = `
+      <label style="margin-bottom:2px;">Pose sequence <span style="font-weight:400;color:var(--ink-soft);">(loops with LB/RB in Animate)</span></label>
+      <div class="row" id="pose-seq-chips" style="flex-wrap:wrap;gap:4px;margin-bottom:6px;"></div>
+      <div class="row" id="pose-seq-palette" style="flex-wrap:wrap;gap:4px;"></div>
+    `;
+    const chipsEl = el.querySelector('#pose-seq-chips');
+    entity.poseSequence.forEach((poseId, i) => {
+      const chip = document.createElement('button');
+      chip.className = 'btn small success';
+      chip.textContent = `${i + 1}. ${poses[poseId]?.name || '?'}`;
+      chip.disabled = entity.poseSequence.length <= 1;
+      chip.title = chip.disabled ? 'A sequence needs at least one pose' : 'Remove';
+      chip.addEventListener('click', async () => {
+        if (entity.poseSequence.length <= 1) return;
+        entity.poseSequence.splice(i, 1);
+        await save();
+        renderPoseSequenceEditor(entity);
+        drawFrame();
+      });
+      chipsEl.appendChild(chip);
+    });
+    const paletteEl = el.querySelector('#pose-seq-palette');
+    for (const poseId of order) {
+      const btn = document.createElement('button');
+      btn.className = 'btn small secondary';
+      btn.textContent = `+ ${poses[poseId]?.name || '?'}`;
+      btn.addEventListener('click', async () => {
+        entity.poseSequence.push(poseId);
+        await save();
+        renderPoseSequenceEditor(entity);
+        drawFrame();
+      });
+      paletteEl.appendChild(btn);
+    }
   }
 
   function selectEntity(id) {
@@ -225,19 +298,22 @@ export async function render(root, params) {
 
   function drawFrame() {
     if (!runtime) return;
-    runtime.render(ctx, 0, null, selectedEntityId);
+    runtime.render(ctx, 0, null, selectedEntityId, { fullWorld: true });
   }
 
-  // Canvas pixels and reference-space pixels differ by a fixed uniform
-  // factor (canvas aspect always matches REF_WIDTH x REF_HEIGHT).
-  const refScale = STAGE_WIDTH / REF_WIDTH;
+  // The editor always shows the whole world zoomed out (fullWorld) so
+  // everything can be placed at a glance, even a background much wider than
+  // the standard frame — this mirrors exactly what SceneRuntime.render()
+  // itself uses in that mode, so hit-testing/dragging line up with what's drawn.
+  function transform() {
+    return getWorldTransform(runtime?.worldWidth || REF_WIDTH, STAGE_WIDTH, STAGE_HEIGHT, true);
+  }
 
   function entityBounds(entity) {
-    const w = STAGE_WIDTH;
-    const h = STAGE_HEIGHT;
-    const originX = entity.x * refScale;
-    const originY = entity.y * refScale;
-    const size = entity.scale * h;
+    const { scale, offsetY } = transform();
+    const originX = entity.x * scale;
+    const originY = entity.y * scale + offsetY;
+    const size = entity.scale * REF_HEIGHT * scale;
     if (entity.kind === 'character') {
       return { left: originX - size * 0.4, right: originX + size * 0.4, top: originY - size * FEET_ANCHOR_Y, bottom: originY };
     }
@@ -255,6 +331,11 @@ export async function render(root, params) {
     return { x: (e.clientX - rect.left) * scaleX, y: (e.clientY - rect.top) * scaleY };
   }
 
+  function worldPointFromCanvas(pt) {
+    const { scale, offsetY } = transform();
+    return { x: pt.x / scale, y: (pt.y - offsetY) / scale };
+  }
+
   canvas.addEventListener('pointerdown', (e) => {
     const pt = canvasPointFromEvent(e);
     const hit = [...scene.entities]
@@ -265,7 +346,8 @@ export async function render(root, params) {
       });
     if (hit) {
       selectEntity(hit.id);
-      dragState = { id: hit.id, offsetX: pt.x / refScale - hit.x, offsetY: pt.y / refScale - hit.y };
+      const world = worldPointFromCanvas(pt);
+      dragState = { id: hit.id, offsetX: world.x - hit.x, offsetY: world.y - hit.y };
       canvas.setPointerCapture(e.pointerId);
     }
   });
@@ -274,7 +356,8 @@ export async function render(root, params) {
     const pt = canvasPointFromEvent(e);
     const entity = scene.entities.find((en) => en.id === dragState.id);
     if (!entity) return;
-    const clamped = clampToBounds(pt.x / refScale - dragState.offsetX, pt.y / refScale - dragState.offsetY);
+    const world = worldPointFromCanvas(pt);
+    const clamped = clampToBounds(world.x - dragState.offsetX, world.y - dragState.offsetY, runtime?.worldWidth || REF_WIDTH);
     entity.x = clamped.x;
     entity.y = clamped.y;
     drawFrame();

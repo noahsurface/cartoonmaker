@@ -36,9 +36,29 @@ function randomBlinkInterval() {
   return BLINK_MIN_INTERVAL + Math.random() * (BLINK_MAX_INTERVAL - BLINK_MIN_INTERVAL);
 }
 
+// A character's poses are alternate body layers (e.g. idle, hands-up,
+// running), each with the same {frames, roles:{idle, cycle}} shape as the
+// single body layer had before this existed. Mouth and eyes stay shared
+// across every pose — talking and blinking work identically no matter which
+// pose is active. Characters saved before poses existed only have
+// `layers.body`; this normalizes them into an equivalent single-pose shape
+// on read, without writing anything (the character builder performs the
+// actual one-time persisted migration when such a character is opened).
+export function getCharacterPoses(character) {
+  if (character.poses && character.poseOrder?.length) {
+    return { poses: character.poses, order: character.poseOrder };
+  }
+  const legacy = character.layers?.body || { frames: [], roles: {} };
+  return { poses: { default: legacy }, order: ['default'] };
+}
+
 export function collectCharacterAssetIds(character) {
   const ids = [];
-  for (const layerName of ['body', 'mouth', 'eyes']) {
+  const { poses } = getCharacterPoses(character);
+  for (const pose of Object.values(poses)) {
+    for (const frame of pose.frames || []) ids.push(frame.assetId);
+  }
+  for (const layerName of ['mouth', 'eyes']) {
     const layer = character.layers?.[layerName];
     if (!layer) continue;
     for (const frame of layer.frames) ids.push(frame.assetId);
@@ -56,18 +76,20 @@ function frameAssetId(layer, frameId) {
   return frame ? frame.assetId : null;
 }
 
-/** The body asset used for a character's resting pose — used as the stable
- * reference for sizing the shadow, so it doesn't resize as the body cycles
- * through talk frames. */
-export function resolveIdleBodyAssetId(character) {
-  const body = character.layers?.body;
+/** The body asset used for a given pose's resting frame — used as the stable
+ * reference for sizing that pose's shadow, so it doesn't resize as the body
+ * cycles through talk/move frames. */
+export function resolveIdleBodyAssetId(character, poseId) {
+  const { poses, order } = getCharacterPoses(character);
+  const body = poses[poseId] || poses[order[0]];
   const idleFrameId = body?.roles?.idle ?? body?.frames?.[0]?.id ?? null;
   return frameAssetId(body, idleFrameId);
 }
 
 /** Resolve which body/mouth/eyes asset should be showing right now. */
-export function resolvePoseAssets(character, { mouthHeld, talkClock, eyesLook, blinking }) {
-  const body = character.layers?.body;
+export function resolveFrameAssets(character, { mouthHeld, talkClock, eyesLook, blinking, poseId }) {
+  const { poses, order } = getCharacterPoses(character);
+  const body = poses[poseId] || poses[order[0]];
   const mouth = character.layers?.mouth;
   const eyes = character.layers?.eyes;
 
@@ -120,6 +142,7 @@ export class CharacterAnimState {
     this.blinkTimer = randomBlinkInterval();
     this.talking = false;
     this.talkClock = 0;
+    this.activePoseId = null;
     this._hasSample = false;
   }
 
@@ -127,8 +150,10 @@ export class CharacterAnimState {
    * @param {number} x @param {number} y absolute pixels in the 2560x1440 reference space
    * @param {number} dt seconds
    * @param {boolean} mouthHeld whether this character is currently talking
+   * @param {string|null} activePoseId which of the character's poses (idle, hands-up,
+   *   running, ...) should currently be showing — stepped by the left/right bumper, see input.js
    */
-  update(x, y, dt, mouthHeld = false) {
+  update(x, y, dt, mouthHeld = false, activePoseId = null) {
     dt = Math.max(0, Math.min(dt, 0.25));
     const prevX = this._hasSample ? this.x : x;
     const prevY = this._hasSample ? this.y : y;
@@ -180,6 +205,7 @@ export class CharacterAnimState {
     if (mouthHeld && !this.talking) this.talkClock = 0;
     this.talking = mouthHeld;
     if (mouthHeld) this.talkClock += dt;
+    this.activePoseId = activePoseId;
 
     this.x = x;
     this.y = y;
@@ -215,18 +241,19 @@ export class CharacterAnimState {
  * before it's drawn).
  * @param {CanvasRenderingContext2D} ctx
  * @param {CharacterAnimState} state
- * @param {{bodyAssetId:?string, mouthAssetId:?string, eyesAssetId:?string}} pose
+ * @param {{bodyAssetId:?string, mouthAssetId:?string, eyesAssetId:?string}} sprites resolved
+ *   frame assets for the character's currently-active pose, from resolveFrameAssets()
  * @param {{originX:number, originY:number, size:number, shadowWidthFraction?:number}} geom pixel-space
  *   placement (originY = ground/feet level); shadowWidthFraction is the character's actual (non-transparent)
  *   width as a fraction of `size`, so the shadow can match the character's real silhouette width.
  * @param {{shadowImg:?HTMLImageElement}} fx shared effect images
  */
-export function drawCharacterBody(ctx, state, pose, geom, fx = {}) {
+export function drawCharacterBody(ctx, state, sprites, geom, fx = {}) {
   const { originX, originY, size, shadowWidthFraction = 1 } = geom;
-  const bodyImg = getCachedImage(pose.bodyAssetId);
+  const bodyImg = getCachedImage(sprites.bodyAssetId);
   if (!bodyImg) return;
-  const mouthImg = getCachedImage(pose.mouthAssetId);
-  const eyesImg = getCachedImage(pose.eyesAssetId);
+  const mouthImg = getCachedImage(sprites.mouthAssetId);
+  const eyesImg = getCachedImage(sprites.eyesAssetId);
 
   // Shadow: stays on the ground under the feet, tracks position, ignores sway/bounce/flip.
   if (fx.shadowImg) {

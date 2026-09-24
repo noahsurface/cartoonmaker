@@ -4,16 +4,18 @@
 import { preloadImage, preloadMany, getCachedImage, getContentWidthFraction } from '../utils/image-cache.js';
 import {
   CharacterAnimState,
-  resolvePoseAssets,
+  resolveFrameAssets,
   preloadCharacterImages,
   resolveIdleBodyAssetId,
+  getCharacterPoses,
   drawCharacterBody,
   getCharacterBounds,
   getSpeechBubbleRect,
   drawSpeechBubbleRect,
   rectsOverlap,
 } from './character.js';
-import { REF_WIDTH } from './coords.js';
+import { REF_WIDTH, REF_HEIGHT, computeWorldWidth, getWorldTransform } from './coords.js';
+import { CameraState } from './camera.js';
 import { FX_ASSET_IDS } from '../seed.js';
 
 export const STAGE_WIDTH = 1280;
@@ -33,6 +35,8 @@ export class SceneRuntime {
     this.fx = { shadowImg: null, bubbleFrames: [] };
     this.shadowWidthFractionByCharacterId = new Map();
     this.shadowWidthFractionByObjectId = new Map();
+    this.camera = new CameraState();
+    this.worldWidth = REF_WIDTH;
     for (const entity of scene.entities) {
       if (entity.kind === 'character') {
         this.animStates.set(entity.id, new CharacterAnimState(entity.x, entity.y));
@@ -56,14 +60,21 @@ export class SceneRuntime {
       shadowImg: getCachedImage(FX_ASSET_IDS.shadow),
       bubbleFrames: FX_ASSET_IDS.bubble.map((id) => getCachedImage(id)),
     };
+    this.worldWidth = computeWorldWidth(getCachedImage(this.scene.backgroundAssetId));
 
     // The shadow should match each character's actual (non-transparent) body
-    // width, measured once from their idle pose so it stays stable as the
-    // body cycles through talk frames.
+    // width, measured once per pose from that pose's idle frame so it stays
+    // stable as the body cycles through talk frames — measured separately
+    // per pose since different poses (e.g. a running stance) can have a
+    // meaningfully different silhouette width.
     for (const character of this.characterById.values()) {
-      if (this.shadowWidthFractionByCharacterId.has(character.id)) continue;
-      const idleImg = getCachedImage(resolveIdleBodyAssetId(character));
-      this.shadowWidthFractionByCharacterId.set(character.id, getContentWidthFraction(idleImg));
+      const { order } = getCharacterPoses(character);
+      for (const poseId of order) {
+        const key = `${character.id}:${poseId}`;
+        if (this.shadowWidthFractionByCharacterId.has(key)) continue;
+        const idleImg = getCachedImage(resolveIdleBodyAssetId(character, poseId));
+        this.shadowWidthFractionByCharacterId.set(key, getContentWidthFraction(idleImg));
+      }
     }
     for (const obj of this.objectById.values()) {
       if (this.shadowWidthFractionByObjectId.has(obj.id)) continue;
@@ -79,23 +90,18 @@ export class SceneRuntime {
    * Render one frame.
    * @param {CanvasRenderingContext2D} ctx
    * @param {number} dt seconds since last frame (0 for a static/paused draw)
-   * @param {(entityId:string) => {x:number,y:number,mouthHeld:boolean}|null} resolvePose
+   * @param {(entityId:string) => {x:number,y:number,mouthHeld:boolean,poseId?:string}|null} resolvePose
    *   Returns the current live/playback pose sample for a character entity (position in the
    *   2560x1440 reference space), or null to leave it at rest at its placed position.
    * @param {string|null} highlightEntityId optional entity to draw a selection ring around
+   * @param {{fullWorld?:boolean}} opts fullWorld shows the entire (possibly wider-than-frame)
+   *   world zoomed out to fit the canvas, ignoring camera follow — used by the scene editor so
+   *   everything can be placed at a glance. Omit/false for the normal windowed camera view.
    */
-  render(ctx, dt, resolvePose, highlightEntityId = null) {
+  render(ctx, dt, resolvePose, highlightEntityId = null, opts = {}) {
     const w = ctx.canvas.width;
     const h = ctx.canvas.height;
-    const scale = w / REF_WIDTH; // uniform: canvas aspect always matches REF_WIDTH x REF_HEIGHT
     ctx.clearRect(0, 0, w, h);
-
-    const bg = getCachedImage(this.scene.backgroundAssetId);
-    if (bg) ctx.drawImage(bg, 0, 0, w, h);
-    else {
-      ctx.fillStyle = '#87ceeb';
-      ctx.fillRect(0, 0, w, h);
-    }
 
     // Pass 1: resolve each entity's current base position (before sway/bounce),
     // then depth-sort characters and objects together by how far "down" they
@@ -111,6 +117,26 @@ export class SceneRuntime {
     });
     resolved.sort((a, b) => a.y - b.y || (a.entity.z ?? 0) - (b.entity.z ?? 0));
 
+    // Camera: horizontal-only follow of a designated focus character, a pure
+    // function of that character's resolved x this frame (see camera.js) —
+    // skipped entirely (camX stays 0) in full-world mode, and when the scene
+    // has no follow target or that target isn't present, matching the old
+    // fixed-frame behavior exactly.
+    let camX = 0;
+    if (!opts.fullWorld && this.scene.cameraFollowEntityId) {
+      const focus = resolved.find((r) => r.entity.id === this.scene.cameraFollowEntityId && r.entity.kind === 'character');
+      if (focus) camX = this.camera.update(focus.x, this.worldWidth, dt);
+    }
+    const { scale, offsetY } = getWorldTransform(this.worldWidth, w, h, !!opts.fullWorld);
+
+    const bg = getCachedImage(this.scene.backgroundAssetId);
+    if (bg) {
+      ctx.drawImage(bg, -camX * scale, offsetY, this.worldWidth * scale, REF_HEIGHT * scale);
+    } else {
+      ctx.fillStyle = '#87ceeb';
+      ctx.fillRect(0, offsetY, w, REF_HEIGHT * scale);
+    }
+
     // Pass 2: draw every character's shadow+body and every object in that
     // depth order. Speech bubbles are deferred to pass 3 so they can be drawn
     // above everything and checked for overlap against every character's
@@ -123,21 +149,23 @@ export class SceneRuntime {
         const character = this.characterById.get(entity.refId);
         if (!character) continue;
         const state = this.animStates.get(entity.id);
-        state.update(x, y, dt, sample?.mouthHeld ?? false);
-        const pose = resolvePoseAssets(character, {
+        const poseId = sample?.poseId ?? entity.poseSequence?.[0] ?? getCharacterPoses(character).order[0];
+        state.update(x, y, dt, sample?.mouthHeld ?? false, poseId);
+        const sprites = resolveFrameAssets(character, {
           mouthHeld: state.talking,
           talkClock: state.talkClock,
           eyesLook: state.eyesLook,
           blinking: state.isBlinking,
+          poseId: state.activePoseId,
         });
-        const size = entity.scale * h;
+        const size = entity.scale * REF_HEIGHT * scale;
         const geom = {
-          originX: x * scale,
-          originY: y * scale,
+          originX: (x - camX) * scale,
+          originY: y * scale + offsetY,
           size,
-          shadowWidthFraction: this.shadowWidthFractionByCharacterId.get(character.id) ?? 1,
+          shadowWidthFraction: this.shadowWidthFractionByCharacterId.get(`${character.id}:${state.activePoseId}`) ?? 1,
         };
-        drawCharacterBody(ctx, state, pose, geom, this.fx);
+        drawCharacterBody(ctx, state, sprites, geom, this.fx);
         if (entity.id === highlightEntityId) {
           ctx.save();
           ctx.strokeStyle = '#2fa8ff';
@@ -153,12 +181,12 @@ export class SceneRuntime {
         if (!obj) continue;
         const img = getCachedImage(obj.assetId);
         if (!img) continue;
-        const size = entity.scale * h;
+        const size = entity.scale * REF_HEIGHT * scale;
         const aspect = img.width / img.height || 1;
         const dw = size * aspect;
         const dh = size;
-        const ox = x * scale;
-        const oy = y * scale;
+        const ox = (x - camX) * scale;
+        const oy = y * scale + offsetY;
         if (entity.hasShadow && this.fx.shadowImg) {
           const shadowAspect = this.fx.shadowImg.width / this.fx.shadowImg.height || 4;
           const shadowW = dw * (this.shadowWidthFractionByObjectId.get(obj.id) ?? 1);

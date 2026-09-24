@@ -2,19 +2,20 @@
 // track, and resolves what that track (or any other already-recorded track)
 // should look like at an arbitrary playback time. Positions are absolute
 // pixels in the shared 2560x1440 reference space (see engine/coords.js).
-import { clampToBounds } from './coords.js';
+import { clampToBounds, REF_WIDTH } from './coords.js';
 
 const MAX_SPEED = 500; // px/sec
 const ACCEL = 2000; // px/sec^2, used for both speeding up and slowing down
 
 export class TrackRecorder {
-  constructor(startX, startY) {
+  constructor(startX, startY, worldWidth = REF_WIDTH) {
     this.samples = [];
     this.startedAt = null;
     this.x = startX;
     this.y = startY;
     this.vx = 0;
     this.vy = 0;
+    this.worldWidth = worldWidth;
   }
 
   start() {
@@ -23,7 +24,7 @@ export class TrackRecorder {
   }
 
   /** Advance position from an input direction (-1..1 each axis) and record a sample. Returns the new {x,y}. */
-  step(dx, dy, dt, mouthHeld) {
+  step(dx, dy, dt, mouthHeld, poseId = null) {
     // Normalize so diagonal input doesn't move faster than a single axis.
     const mag = Math.hypot(dx, dy);
     const dirX = mag > 1 ? dx / mag : dx;
@@ -34,7 +35,7 @@ export class TrackRecorder {
     this.vx = moveToward(this.vx, targetVx, ACCEL * dt);
     this.vy = moveToward(this.vy, targetVy, ACCEL * dt);
 
-    const next = clampToBounds(this.x + this.vx * dt, this.y + this.vy * dt);
+    const next = clampToBounds(this.x + this.vx * dt, this.y + this.vy * dt, this.worldWidth);
     // If we hit a bound, stop the velocity on that axis instead of pinning
     // against it at full speed (which would cause a jarring re-launch).
     if (next.x !== this.x + this.vx * dt) this.vx = 0;
@@ -43,7 +44,7 @@ export class TrackRecorder {
     this.y = next.y;
 
     const t = (performance.now() - this.startedAt) / 1000;
-    this.samples.push({ t, x: this.x, y: this.y, mouthHeld });
+    this.samples.push({ t, x: this.x, y: this.y, mouthHeld, poseId });
     return { x: this.x, y: this.y };
   }
 
@@ -64,9 +65,9 @@ export function sampleTrackAt(track, t) {
   const samples = track?.samples;
   if (!samples || samples.length === 0) return null;
   const first = samples[0];
-  if (t <= first.t) return { x: first.x, y: first.y, mouthHeld: first.mouthHeld };
+  if (t <= first.t) return { x: first.x, y: first.y, mouthHeld: first.mouthHeld, poseId: first.poseId };
   const last = samples[samples.length - 1];
-  if (t >= last.t) return { x: last.x, y: last.y, mouthHeld: false };
+  if (t >= last.t) return { x: last.x, y: last.y, mouthHeld: false, poseId: last.poseId };
 
   let lo = 0;
   let hi = samples.length - 1;
@@ -82,7 +83,10 @@ export function sampleTrackAt(track, t) {
   return {
     x: a.x + (b.x - a.x) * frac,
     y: a.y + (b.y - a.y) * frac,
+    // Discrete/step fields (not interpolated) hold the earlier sample's
+    // value until it actually changes, same as mouthHeld always has.
     mouthHeld: a.mouthHeld,
+    poseId: a.poseId,
   };
 }
 
