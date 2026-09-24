@@ -97,11 +97,15 @@ async function seedCharacterRecord(spec, assetIds) {
     id: spec.id,
     name: spec.name,
     createdAt: Date.now(),
-    layers: {
-      body: {
+    poses: {
+      'pose-idle': {
+        name: 'Idle',
         frames: [bodyIdleFrame, ...bodyCycleFrames],
         roles: { idle: bodyIdleFrame.id, cycle: bodyCycleFrames.map((fr) => fr.id) },
       },
+    },
+    poseOrder: ['pose-idle'],
+    layers: {
       mouth: {
         frames: [mouthSilentFrame, ...mouthTalkFrames],
         roles: { silent: mouthSilentFrame.id, talk: mouthTalkFrames.map((fr) => fr.id) },

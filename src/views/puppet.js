@@ -4,6 +4,7 @@ import { SceneRuntime, STAGE_WIDTH, STAGE_HEIGHT } from '../engine/scene.js';
 import { InputSource } from '../engine/input.js';
 import { TrackRecorder, sampleTrackAt, sceneDuration } from '../engine/recorder.js';
 import { decodeAudioBuffer, computeWaveformPeaks, drawWaveform } from '../engine/audio.js';
+import { getCharacterPoses } from '../engine/character.js';
 
 export async function render(root, params) {
   const sceneId = params.id;
@@ -32,6 +33,11 @@ export async function render(root, params) {
   let mode = 'idle'; // 'idle' | 'recording' | 'previewing'
   let sceneTime = 0;
   let recorder = null;
+  // The armed entity's pose sequence and where we currently are in it —
+  // stepped by LB/RB (or [ / ]) only while actually recording, mirroring how
+  // movement/talk are also only live during a take.
+  let poseSequence = [];
+  let currentPoseIndex = 0;
   const input = new InputSource();
   let runtime = null;
   let rafHandle = null;
@@ -83,6 +89,7 @@ export async function render(root, params) {
         <div class="dpad-help">
           Move: <span class="kbd">arrow keys</span> / <span class="kbd">WASD</span> or stick / d-pad<br/>
           Talk (hold): <span class="kbd">Space</span> or face button A / right trigger<br/>
+          Switch pose: <span class="kbd">[</span> / <span class="kbd">]</span> or left/right bumper<br/>
           <em>Eye direction and blinking are automatic.</em>
         </div>
         <h2>Who's up?</h2>
@@ -91,6 +98,7 @@ export async function render(root, params) {
           <button class="btn danger" id="record-btn">● Record</button>
           <button class="btn secondary" id="stop-record-btn" disabled>■ Stop</button>
         </div>
+        <div id="pose-status" style="margin-top:6px;font-size:0.8rem;color:var(--ink-soft);"></div>
         <div id="record-status" style="margin-top:8px;"></div>
       </div>
     </div>
@@ -194,9 +202,30 @@ export async function render(root, params) {
   refreshTrackList();
   await refreshAudioUI();
 
+  const poseStatusEl = root.querySelector('#pose-status');
+
+  function refreshPoseSequenceForArmed() {
+    const entity = characterEntities.find((e) => e.id === armedEntityId);
+    const character = entity ? characterById.get(entity.refId) : null;
+    const { order } = getCharacterPoses(character || {});
+    poseSequence = entity?.poseSequence?.length ? entity.poseSequence : [order[0]];
+    currentPoseIndex = 0;
+    updatePoseStatus();
+  }
+
+  function updatePoseStatus() {
+    const entity = characterEntities.find((e) => e.id === armedEntityId);
+    const character = entity ? characterById.get(entity.refId) : null;
+    const { poses } = getCharacterPoses(character || {});
+    const poseId = poseSequence[currentPoseIndex];
+    poseStatusEl.textContent = poseSequence.length > 1 ? `Pose: ${poses[poseId]?.name || '?'} (${currentPoseIndex + 1}/${poseSequence.length})` : '';
+  }
+
   armedSelect.addEventListener('change', () => {
     armedEntityId = armedSelect.value;
+    refreshPoseSequenceForArmed();
   });
+  refreshPoseSequenceForArmed();
 
   async function rebuildRuntime() {
     runtime = new SceneRuntime(scene, characterById, objectById);
@@ -240,9 +269,14 @@ export async function render(root, params) {
     if (mode === 'recording') {
       sceneTime += dt;
       const sample = input.sample();
-      const { x, y } = recorder.step(sample.dx, sample.dy, dt, sample.mouthHeld);
+      if (sample.poseStep) {
+        currentPoseIndex = (currentPoseIndex + sample.poseStep + poseSequence.length) % poseSequence.length;
+        updatePoseStatus();
+      }
+      const activePoseId = poseSequence[currentPoseIndex];
+      const { x, y } = recorder.step(sample.dx, sample.dy, dt, sample.mouthHeld, activePoseId);
       runtime.render(ctx, dt, (entityId) => {
-        if (entityId === armedEntityId) return { x, y, mouthHeld: sample.mouthHeld };
+        if (entityId === armedEntityId) return { x, y, mouthHeld: sample.mouthHeld, poseId: activePoseId };
         const track = scene.tracks[entityId];
         return track ? sampleTrackAt(track, sceneTime) : null;
       }, armedEntityId);
@@ -276,8 +310,9 @@ export async function render(root, params) {
     if (mode !== 'idle') return;
     mode = 'recording';
     sceneTime = 0;
+    refreshPoseSequenceForArmed();
     const entity = characterEntities.find((e) => e.id === armedEntityId);
-    recorder = new TrackRecorder(entity.x, entity.y);
+    recorder = new TrackRecorder(entity.x, entity.y, runtime.worldWidth);
     recorder.start();
     armedSelect.disabled = true;
     recordBtn.disabled = true;
@@ -306,6 +341,7 @@ export async function render(root, params) {
     if (next) armedEntityId = next.id;
     refreshArmedSelect();
     refreshTrackList();
+    refreshPoseSequenceForArmed();
     sceneTime = 0;
     drawStatic(0);
   });

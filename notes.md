@@ -10,17 +10,39 @@ Running log of what was built and any non-obvious decisions, as the app is built
 
 ## Character model
 
-A character is three independently-posed layers — `body`, `mouth`, `eyes` — each a list of labelled frames (`{id, label, assetId}`) plus a `roles` map that says which frame(s) are special:
+A character has three parts: any number of named **poses** (each an independently-posed `body` layer — see "Multi-pose characters" below), plus one shared `mouth` layer and one shared `eyes` layer, each a list of labelled frames (`{id, label, assetId}`) plus a `roles` map that says which frame(s) are special:
 
-- `body.roles.idle` (single frame), `body.roles.cycle` (ordered list, played on a loop while the character is moving — there's no true walk-cycle art, so this cycles through whatever frames the user assigns).
+- Each pose's body layer: `roles.idle` (single frame), `roles.cycle` (ordered list, played on a loop while the character is moving — there's no true walk-cycle art, so this cycles through whatever frames the user assigns).
 - `mouth.roles.silent` (single frame), `mouth.roles.talk` (ordered list, looped while the talk button/key is held).
 - `eyes.roles.forward` / `side` / `blink` (single frames each).
 
-All three layers are drawn on top of each other at the same anchor point every frame. This only works because the sample art is authored that way (all layers are 1200x1200 canvases pre-aligned to a shared origin) — the character builder doesn't do any per-frame offset editing, it assumes new custom characters follow the same convention (documented in the Characters view's help text).
+The active pose's body, plus mouth and eyes, are drawn on top of each other at the same anchor point every frame. This only works because the sample art is authored that way (all layers are 1200x1200 canvases pre-aligned to a shared origin) — the character builder doesn't do any per-frame offset editing, it assumes new custom characters follow the same convention (documented in the Characters view's help text).
+
+## Multi-pose characters
+
+A character can have several named poses (e.g. idle, hands-up, running) instead of just one body — each pose is its own body layer with the same idle/cycle-frame shape a single body used to have, so a pose can be as simple as one static frame or as rich as its own multi-frame movement cycle. Mouth and eyes stay shared across every pose (unaffected by which one is active), and sway/bounce keep applying regardless of pose, by design — a pose changes what's drawn, not how the existing motion machinery moves it.
+
+`getCharacterPoses(character)` (`engine/character.js`) is the one place that reads a character's poses, normalizing older characters (saved with a single `layers.body`, before this existed) into an equivalent single-pose shape on the fly — a read-only fallback, not a migration. The actual one-time persisted migration (`layers.body` → `poses: {id: {...}}, poseOrder: [id]`) happens in the character builder (`views/characters.js`) the first time such a character is opened there, the same self-healing pattern used for `baseScale` earlier.
+
+Per scene, per placed character entity, `entity.poseSequence` is an ordered (and possibly repeating — e.g. `[idle, handsUp, idle, running, idle]`) list of pose ids. While recording, the left/right bumper (or `[`/`]`) steps an index through that list, wrapping at both ends; the scene editor builds this list with an append-from-palette + remove-by-chip UI rather than free reordering, since an ordered, repeatable loop is the actual use case and needs much less UI than a general reorder control. The current pose index is sampled into the recorded track exactly like `mouthHeld` is (see "Recording model"), so played-back and exported animation reproduces pose changes at the right moments — not just live puppeteering.
+
+Shadow width-matching (see below) is measured per **(character, pose)** pair, not once per character, since different poses can have meaningfully different silhouette widths.
 
 ## Coordinate system
 
-Entity positions are stored as absolute pixels in a fixed 2560x1440 reference space (`src/engine/coords.js`), matching the sample background's native resolution — not normalized 0..1. This matters because it's what makes movement speed/acceleration isotropic (the same in x and y); a 0..1-per-axis scheme would silently move faster vertically than horizontally, since the background isn't square. Every render target (the 1280x720 live stage, a 1920x1080 export) is a uniform scale of this space (`scale = canvas.width / REF_WIDTH`), so nothing needs to change per resolution.
+Entity positions are stored as absolute pixels in a fixed 2560x1440 reference space (`src/engine/coords.js`), matching the sample background's native resolution — not normalized 0..1. This matters because it's what makes movement speed/acceleration isotropic (the same in x and y); a 0..1-per-axis scheme would silently move faster vertically than horizontally, since the background isn't square. Every windowed render target (the 1280x720 live stage, a 1920x1080 export) is a uniform scale of this same REF_WIDTH x REF_HEIGHT space (`scale = canvas.width / REF_WIDTH`) — that's the definition of the camera's fixed zoom level — so nothing needs to change per resolution.
+
+A scene's **world** can be wider than that: the background is drawn at its own native aspect ratio instead of being stretched to fill the frame, so a background wider (relative to its height) than the standard aspect implies scrollable width beyond REF_WIDTH (`computeWorldWidth()`). A background at or narrower than the standard aspect — every background before this existed, and the bundled sample — yields exactly REF_WIDTH back, so existing scenes are pixel-for-pixel unaffected.
+
+## Camera
+
+Horizontal-only camera follow (`engine/camera.js`, `CameraState`), designed the same way as `CharacterAnimState`: it's a pure function of a position stream (the designated "focus" character's x each frame, from `scene.cameraFollowEntityId`) plus `dt`, so it re-derives identically for live puppeteering, played-back tracks, and export with **no separate camera recording** — `SceneRuntime` just calls `camera.update()` during its normal render pass, using whichever entity's resolved x that frame already provides.
+
+The follow behavior is a classic deadzone camera: the focus character can move freely within a zone near the center of the frame; only once they'd go outside it does the camera start panning, easing (not snapping) toward keeping them at the deadzone's edge, clamped so it never shows past the world's actual edges. A `dt <= 0` call (a static preview draw, or a manual timeline scrub) snaps straight to centering the focus character instead of easing — this matters because otherwise scrubbing the timeline while paused would show a stale, previously-eased-to position rather than the framing that time actually calls for; verified by scrubbing straight back to t=0 after a long pan and confirming the exact original framing returns, byte-for-byte.
+
+One scene-level setting: `scene.cameraFollowEntityId` (a character entity id, or unset for a static camera — the old, only, behavior). No follow target, or a background at standard aspect (so there's nothing to scroll to regardless), and the camera is a no-op; this is why nothing needed to change for any existing scene.
+
+`SceneRuntime.render()` takes an `opts.fullWorld` flag: false (the default, used by Animate and Export) shows the normal windowed camera view; true (used only by the scene editor) shows the **entire** world zoomed out to fit the canvas width instead, ignoring camera follow entirely, letterboxing top/bottom if the world is wider than the standard aspect — so everything in a wide scene can be placed at a glance without any pan/scroll UI of its own. `getWorldTransform()` computes the scale/letterbox-offset for both modes from the same inputs, and the editor's own drag-and-drop hit-testing uses that identical transform (rather than a separate hardcoded one) so what you can click matches what's drawn.
 
 ## Movement & animation feel (paper-cutout aesthetic)
 
@@ -51,7 +73,9 @@ Characters and objects are drawn in Y order each frame — greater y (further do
 
 ## Recording model
 
-Recording a character does *not* bake in sway/bounce/flip/eyes/blink/pose-frame-index — it only stores what the user actually controlled: a timestamped list of `{t, x, y, mouthHeld}` samples (`src/engine/recorder.js`). Everything visual (including eye direction and blinking) is re-derived at playback time from that stream, same as during live control. Interpolation is linear for position; `mouthHeld` is a step function (holds the last sample's value) since it's a discrete input.
+Recording a character does *not* bake in sway/bounce/flip/eyes/blink/talk-cycle-frame-index — it only stores what the user actually controlled: a timestamped list of `{t, x, y, mouthHeld, poseId}` samples (`src/engine/recorder.js`). Everything else visual (including eye direction, blinking, and which frame within a pose's cycle is showing) is re-derived at playback time from that stream, same as during live control. Interpolation is linear for position; `mouthHeld` and `poseId` are step functions (hold the last sample's value) since both are discrete, edge-triggered inputs, not continuous ones.
+
+`TrackRecorder` also clamps movement to the scene's actual `worldWidth` (passed in at construction), not a hardcoded REF_WIDTH, so a character can walk the full length of a wide, scrollable scene rather than being capped at one camera-frame's width.
 
 Layered recording (record character 1, then record character 2 while character 1's track plays back, etc.) works by having the scene renderer accept one `resolvePose(entityId)` callback that returns either a live-input-driven position (for the character currently being recorded) or a `sampleTrackAt(track, t)` lookup (for every previously-recorded character) or `null` (falls back to the character's static placed position from the scene editor, for anyone not yet recorded).
 
@@ -61,7 +85,9 @@ Layered recording (record character 1, then record character 2 while character 1
 
 Every key this app reads (arrows, WASD, Space) is also a key the browser scrolls the page with by default, so `InputSource` calls `preventDefault()` on those specific key events — otherwise puppeteering with the keyboard fallback scrolls the stage out of view.
 
-Mapping: left stick / d-pad → move (Arrow keys / WASD), face button 0 or right trigger → hold to talk (Space). That's the entire mapping — eye direction and blinking are fully automatic and have no input at all.
+Mapping: left stick / d-pad → move (Arrow keys / WASD), face button 0 or right trigger → hold to talk (Space), left/right bumper → step to the previous/next pose (`[` / `]`). Eye direction and blinking remain fully automatic with no input mapping at all.
+
+Pose-stepping is edge-triggered (one step per press), unlike movement/talk which are level-based (read as "currently held" every frame). Keyboard presses are trivial to edge-detect (the `keydown` handler itself only fires once per physical press, ignoring OS auto-repeat via `e.repeat`), but the Gamepad API has no press events at all — every button is polled as a snapshot each frame — so the bumpers need their own from-scratch edge detection: `InputSource` remembers last frame's polled `pressed` state for buttons 4/5 and only counts a step on the false→true transition.
 
 ## Dialogue audio
 
@@ -76,6 +102,8 @@ For export, the dialogue audio is decoded again into an `AudioBufferSourceNode`,
 Canvas capture via `canvas.captureStream()` + `MediaRecorder`, recording webm (with an opus audio track mixed in when the scene has dialogue audio). The export view plays the full composited scene at real time speed while capturing, then offers the result as a download. Resolution/frame rate default to 1280x720 @ 30fps; a control for picking an alternate resolution/frame rate is exposed since it was cheap to add.
 
 Changing resolution/fps constructs a fresh `SceneRuntime` at export time (its canvas is a different size than the editor's), and that runtime's `preload()` must be awaited before rendering starts — `preload()` is what populates the shadow image, speech bubble frames, and shadow-width caches (`this.fx`, `shadowWidthFractionBy*IdMap`) on that specific instance; a `SceneRuntime` with those left at constructor defaults still renders characters and objects fine (their images come from the separate module-level image cache) but silently draws no shadows or bubbles. This was missed on the export view's "Render video" button specifically (the initial static preview on that page did call `preload()`), which is why exported video was missing shadows/speech bubbles while the live editor and puppeteering views, which already awaited it, looked correct.
+
+Neither the camera nor multi-pose characters needed any changes to `export.js` at all — both are handled entirely inside `SceneRuntime.render()`/`sampleTrackAt()`, which export.js already calls the same way it always has. That both features "just worked" in an exported video on the first try (verified below) is a decent sign the position/pose-stream-driven architecture is paying for itself.
 
 ## Testing
 
@@ -97,6 +125,8 @@ Since I can't operate a physical gamepad, the app was driven end-to-end with a h
 - **Scale slider snapping**: read the slider's `min`/`max`/`step` DOM attributes directly and confirmed the on-screen label text updates to "1x"/"1.5x"/"2x" as the (snapped) value changes.
 - **Speech bubble scaling with character size**: called `getSpeechBubbleRect()` directly with identical state but geometry at 1x vs. 2x size — confirmed both the bubble's width and its offset distance from the character exactly doubled, not just that a UI label changed.
 - **Export shadow/bubble bug**: recorded a stationary, talking character next to a shadowed object, ran a full export, then extracted a frame from the resulting webm with `ffmpeg` and visually confirmed the character's shadow, the object's shadow, and the speech bubble are all present in the exported video (they were not, before the `preload()` fix).
+- **Camera follow**: generated a synthetic 5120x1440 background (2x the standard width, with distinct colored bands so any horizontal shift is unmistakable), confirmed the scene editor's full-world view actually letterboxes it (a sampled top-row pixel is blank, a mid-row one shows real content) rather than stretching it, set camera-follow to a character, and confirmed by sampling a *fixed* screen pixel before vs. during a long rightward recording that the color visible there changed — proof the background genuinely scrolled under a stationary point, not just that the character moved. Also confirmed restarting/scrubbing straight back to t=0 reproduces the exact original framing byte-for-byte (the dt<=0 snap-to-ideal behavior in `CameraState`), and that an unmodified standard-aspect scene shows zero letterboxing (no regression for every scene that existed before this feature).
+- **Multi-pose characters**: added a second pose with distinct art to a bundled character via the builder, added it to that character's scene-entity pose sequence, then during a live recording pressed `]`/`[` and sampled the same on-screen pixel each time — confirmed the rendered body art actually changes (not just a UI label) and reverts exactly when stepping back. Separately confirmed via IndexedDB that the recorded track carries two distinct `poseId` values across its samples, and that scrubbing the timeline to early vs. late in that same recording shows the correct pose for that point in time — i.e. the pose change survives record → save → played-back-at-a-given-t, not just the live moment it was pressed. Finally, exported a combined scene (wide scrollable background + camera follow + a mid-recording pose switch) to video and inspected extracted frames to confirm both features come through a real export with no extra wiring needed in `export.js`.
 
 ## Known simplifications (given the "work independently" brief)
 
@@ -105,3 +135,5 @@ Since I can't operate a physical gamepad, the app was driven end-to-end with a h
 - Object props are static per scene (position/scale/z only, no animation) since the spec explicitly describes them as non-posed.
 - Dialogue audio is one file per scene with no in-app trimming/offsetting — it always starts at scene time 0. It's meant to be fully assembled in external audio software first, per the given direction, so this wasn't built out further (no per-clip placement/multi-track).
 - Audio/video sync during live preview is "set `currentTime` once and let both clocks run," not frame-accurate drift correction — acceptable for short dialogue clips, but a very long recording session could drift a little between the visual scene clock and the audio element's own playback clock.
+- Camera follow is horizontal-only, and follows exactly one designated character per scene — matching what was actually asked for (a character walking down a long street). Multiple independently-moving characters in a wide scene would need a group-framing policy (follow a centroid, zoom to fit) this doesn't attempt.
+- The scene editor's pose-sequence control is append-from-palette + remove-by-position, not free drag-reordering — covers building an ordered, repeatable loop like `idle, handsUp, idle, running, idle` with much less UI; fixing a wrong order means removing and re-adding in the right order rather than dragging an item into place.
