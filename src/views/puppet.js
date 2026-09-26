@@ -312,7 +312,7 @@ export async function render(root, params) {
     sceneTime = 0;
     refreshPoseSequenceForArmed();
     const entity = characterEntities.find((e) => e.id === armedEntityId);
-    recorder = new TrackRecorder(entity.x, entity.y, runtime.worldWidth);
+    recorder = new TrackRecorder(entity.x, entity.y, runtime.worldWidth, runtime.worldHeight, runtime.getSolidObstacles());
     recorder.start();
     armedSelect.disabled = true;
     recordBtn.disabled = true;

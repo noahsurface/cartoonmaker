@@ -1,7 +1,7 @@
 // Composites a background with any number of character/object entities onto
 // a canvas. Used identically by the scene editor (static preview), the
 // puppeteering view (live + played-back tracks), and video export.
-import { preloadImage, preloadMany, getCachedImage, getContentWidthFraction } from '../utils/image-cache.js';
+import { preloadImage, preloadMany, getCachedImage, getContentMetrics } from '../utils/image-cache.js';
 import {
   CharacterAnimState,
   resolveFrameAssets,
@@ -14,7 +14,7 @@ import {
   drawSpeechBubbleRect,
   rectsOverlap,
 } from './character.js';
-import { REF_WIDTH, REF_HEIGHT, computeWorldWidth, getWorldTransform } from './coords.js';
+import { REF_WIDTH, REF_HEIGHT, computeWorldSize, getWorldTransform } from './coords.js';
 import { CameraState } from './camera.js';
 import { FX_ASSET_IDS } from '../seed.js';
 
@@ -35,8 +35,10 @@ export class SceneRuntime {
     this.fx = { shadowImg: null, bubbleFrames: [] };
     this.shadowWidthFractionByCharacterId = new Map();
     this.shadowWidthFractionByObjectId = new Map();
+    this.shadowBottomFractionByObjectId = new Map();
     this.camera = new CameraState();
     this.worldWidth = REF_WIDTH;
+    this.worldHeight = REF_HEIGHT;
     for (const entity of scene.entities) {
       if (entity.kind === 'character') {
         this.animStates.set(entity.id, new CharacterAnimState(entity.x, entity.y));
@@ -60,7 +62,9 @@ export class SceneRuntime {
       shadowImg: getCachedImage(FX_ASSET_IDS.shadow),
       bubbleFrames: FX_ASSET_IDS.bubble.map((id) => getCachedImage(id)),
     };
-    this.worldWidth = computeWorldWidth(getCachedImage(this.scene.backgroundAssetId));
+    const { width, height } = computeWorldSize(getCachedImage(this.scene.backgroundAssetId));
+    this.worldWidth = width;
+    this.worldHeight = height;
 
     // The shadow should match each character's actual (non-transparent) body
     // width, measured once per pose from that pose's idle frame so it stays
@@ -73,17 +77,56 @@ export class SceneRuntime {
         const key = `${character.id}:${poseId}`;
         if (this.shadowWidthFractionByCharacterId.has(key)) continue;
         const idleImg = getCachedImage(resolveIdleBodyAssetId(character, poseId));
-        this.shadowWidthFractionByCharacterId.set(key, getContentWidthFraction(idleImg));
+        this.shadowWidthFractionByCharacterId.set(key, getContentMetrics(idleImg).widthFraction);
       }
     }
+    // Objects have no hand-authored anchor convention like a character's
+    // FEET_ANCHOR_Y, so their shadow's width *and* vertical anchor are both
+    // detected from the art's actual non-transparent content — otherwise an
+    // object image with any padding below its visible silhouette (as the
+    // bundled bush has) leaves its shadow floating below the real base.
     for (const obj of this.objectById.values()) {
       if (this.shadowWidthFractionByObjectId.has(obj.id)) continue;
-      this.shadowWidthFractionByObjectId.set(obj.id, getContentWidthFraction(getCachedImage(obj.assetId)));
+      const metrics = getContentMetrics(getCachedImage(obj.assetId));
+      this.shadowWidthFractionByObjectId.set(obj.id, metrics.widthFraction);
+      this.shadowBottomFractionByObjectId.set(obj.id, metrics.bottomFraction);
     }
   }
 
   getAnimState(entityId) {
     return this.animStates.get(entityId);
+  }
+
+  /** Ground-footprint collision rectangles (reference-space pixels) for
+   * every solid object in the scene — shaped like that object's shadow
+   * (same width-matching, anchored at the same detected visual base) rather
+   * than its full rendered height, so a character can still walk in front
+   * of or behind a tall solid object per the normal Y-depth sort, and is
+   * only blocked from walking into its actual base. */
+  getSolidObstacles() {
+    const obstacles = [];
+    const shadowAspect = (this.fx.shadowImg && this.fx.shadowImg.width / this.fx.shadowImg.height) || 4;
+    for (const entity of this.scene.entities) {
+      if (entity.kind !== 'object' || !entity.solid) continue;
+      const obj = this.objectById.get(entity.refId);
+      if (!obj) continue;
+      const img = getCachedImage(obj.assetId);
+      if (!img) continue;
+      const sizeWorld = entity.scale * REF_HEIGHT;
+      const aspect = img.width / img.height || 1;
+      const widthFraction = this.shadowWidthFractionByObjectId.get(obj.id) ?? 1;
+      const bottomFraction = this.shadowBottomFractionByObjectId.get(obj.id) ?? 1;
+      const footprintW = sizeWorld * aspect * widthFraction;
+      const footprintH = footprintW / shadowAspect;
+      const baseY = entity.y - sizeWorld * (1 - bottomFraction);
+      obstacles.push({
+        left: entity.x - footprintW / 2,
+        right: entity.x + footprintW / 2,
+        top: baseY - footprintH / 2,
+        bottom: baseY + footprintH / 2,
+      });
+    }
+    return obstacles;
   }
 
   /**
@@ -94,7 +137,7 @@ export class SceneRuntime {
    *   Returns the current live/playback pose sample for a character entity (position in the
    *   2560x1440 reference space), or null to leave it at rest at its placed position.
    * @param {string|null} highlightEntityId optional entity to draw a selection ring around
-   * @param {{fullWorld?:boolean}} opts fullWorld shows the entire (possibly wider-than-frame)
+   * @param {{fullWorld?:boolean}} opts fullWorld shows the entire (possibly larger-than-frame)
    *   world zoomed out to fit the canvas, ignoring camera follow — used by the scene editor so
    *   everything can be placed at a glance. Omit/false for the normal windowed camera view.
    */
@@ -117,24 +160,30 @@ export class SceneRuntime {
     });
     resolved.sort((a, b) => a.y - b.y || (a.entity.z ?? 0) - (b.entity.z ?? 0));
 
-    // Camera: horizontal-only follow of a designated focus character, a pure
-    // function of that character's resolved x this frame (see camera.js) —
-    // skipped entirely (camX stays 0) in full-world mode, and when the scene
-    // has no follow target or that target isn't present, matching the old
-    // fixed-frame behavior exactly.
+    // Camera: follow of a designated focus character on whichever axes the
+    // world is actually scrollable on, a pure function of that character's
+    // resolved position this frame (see camera.js) — skipped entirely (cam
+    // stays at 0,0) in full-world mode, and when the scene has no follow
+    // target or that target isn't present, matching the old fixed-frame
+    // behavior exactly.
     let camX = 0;
+    let camY = 0;
     if (!opts.fullWorld && this.scene.cameraFollowEntityId) {
       const focus = resolved.find((r) => r.entity.id === this.scene.cameraFollowEntityId && r.entity.kind === 'character');
-      if (focus) camX = this.camera.update(focus.x, this.worldWidth, dt);
+      if (focus) {
+        const cam = this.camera.update(focus.x, focus.y, this.worldWidth, this.worldHeight, dt);
+        camX = cam.x;
+        camY = cam.y;
+      }
     }
-    const { scale, offsetY } = getWorldTransform(this.worldWidth, w, h, !!opts.fullWorld);
+    const { scale, offsetX, offsetY } = getWorldTransform(this.worldWidth, this.worldHeight, w, h, !!opts.fullWorld);
 
     const bg = getCachedImage(this.scene.backgroundAssetId);
     if (bg) {
-      ctx.drawImage(bg, -camX * scale, offsetY, this.worldWidth * scale, REF_HEIGHT * scale);
+      ctx.drawImage(bg, offsetX - camX * scale, offsetY - camY * scale, this.worldWidth * scale, this.worldHeight * scale);
     } else {
       ctx.fillStyle = '#87ceeb';
-      ctx.fillRect(0, offsetY, w, REF_HEIGHT * scale);
+      ctx.fillRect(offsetX, offsetY, this.worldWidth * scale, this.worldHeight * scale);
     }
 
     // Pass 2: draw every character's shadow+body and every object in that
@@ -156,14 +205,14 @@ export class SceneRuntime {
           talkClock: state.talkClock,
           eyesLook: state.eyesLook,
           blinking: state.isBlinking,
-          poseId: state.activePoseId,
+          poseId: state.displayPoseId,
         });
         const size = entity.scale * REF_HEIGHT * scale;
         const geom = {
-          originX: (x - camX) * scale,
-          originY: y * scale + offsetY,
+          originX: offsetX + (x - camX) * scale,
+          originY: offsetY + (y - camY) * scale,
           size,
-          shadowWidthFraction: this.shadowWidthFractionByCharacterId.get(`${character.id}:${state.activePoseId}`) ?? 1,
+          shadowWidthFraction: this.shadowWidthFractionByCharacterId.get(`${character.id}:${state.displayPoseId}`) ?? 1,
         };
         drawCharacterBody(ctx, state, sprites, geom, this.fx);
         if (entity.id === highlightEntityId) {
@@ -185,13 +234,18 @@ export class SceneRuntime {
         const aspect = img.width / img.height || 1;
         const dw = size * aspect;
         const dh = size;
-        const ox = (x - camX) * scale;
-        const oy = y * scale + offsetY;
+        const ox = offsetX + (x - camX) * scale;
+        const oy = offsetY + (y - camY) * scale;
         if (entity.hasShadow && this.fx.shadowImg) {
           const shadowAspect = this.fx.shadowImg.width / this.fx.shadowImg.height || 4;
           const shadowW = dw * (this.shadowWidthFractionByObjectId.get(obj.id) ?? 1);
           const shadowH = shadowW / shadowAspect;
-          ctx.drawImage(this.fx.shadowImg, ox - shadowW / 2, oy - shadowH / 2, shadowW, shadowH);
+          // Anchored at the object's actual detected visual base, not the
+          // (possibly padded) bottom edge of its image file — see
+          // getContentMetrics in utils/image-cache.js.
+          const bottomFraction = this.shadowBottomFractionByObjectId.get(obj.id) ?? 1;
+          const contentBottomY = oy - dh * (1 - bottomFraction);
+          ctx.drawImage(this.fx.shadowImg, ox - shadowW / 2, contentBottomY - shadowH / 2, shadowW, shadowH);
         }
         ctx.drawImage(img, ox - dw / 2, oy - dh, dw, dh);
         if (entity.id === highlightEntityId) {

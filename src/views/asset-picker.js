@@ -1,16 +1,22 @@
 // A small modal for picking an existing image asset (used by the character
-// builder when assigning artwork to a layer frame).
+// builder when assigning artwork to a layer frame, and by the scene editor
+// when choosing a background). Folder-aware: browsing into a folder (e.g. a
+// user-made "Backgrounds" folder) filters the grid to it, matching how the
+// Assets page organizes the library, so a folder created there to organize
+// backgrounds actually makes them faster to find here too.
 import { getAll, getAssetUrl, importAssetFile } from '../db.js';
 
 export function pickAsset() {
   return new Promise(async (resolve) => {
+    let activeFolderId = 'all'; // 'all' | 'unfiled' | a real folder id
+
     const overlay = document.createElement('div');
     overlay.style.cssText =
       'position:fixed;inset:0;background:rgba(0,0,0,0.55);display:flex;align-items:center;justify-content:center;z-index:100;padding:20px;';
 
     const box = document.createElement('div');
     box.className = 'panel';
-    box.style.cssText = 'max-width:640px;width:100%;max-height:80vh;overflow:auto;margin:0;';
+    box.style.cssText = 'max-width:720px;width:100%;max-height:80vh;overflow:auto;margin:0;';
     box.innerHTML = `
       <div class="row between">
         <h2 style="margin:0">Choose image</h2>
@@ -22,6 +28,7 @@ export function pickAsset() {
           <input type="file" accept="image/*" style="display:none" id="picker-upload" />
         </label>
       </div>
+      <div class="row" id="picker-folders" style="flex-wrap:wrap;gap:4px;margin-bottom:10px;"></div>
       <div class="grid cols-auto" id="picker-grid"></div>
     `;
     overlay.appendChild(box);
@@ -39,25 +46,58 @@ export function pickAsset() {
     box.querySelector('#picker-upload').addEventListener('change', async (e) => {
       const file = e.target.files[0];
       if (!file) return;
-      const asset = await importAssetFile(file);
+      const folderId = activeFolderId === 'all' || activeFolderId === 'unfiled' ? null : activeFolderId;
+      const asset = await importAssetFile(file, folderId);
       close(asset);
     });
 
+    const foldersEl = box.querySelector('#picker-folders');
     const grid = box.querySelector('#picker-grid');
-    const assets = (await getAll('assets'))
-      .filter((a) => a.mime?.startsWith('image/'))
-      .sort((a, b) => b.createdAt - a.createdAt);
-    if (assets.length === 0) {
-      grid.innerHTML = '<div class="empty-state">No assets yet. Upload one above.</div>';
+
+    async function refresh() {
+      const [assets, folders] = await Promise.all([getAll('assets'), getAll('folders')]);
+      folders.sort((a, b) => (a.id === 'system' ? -1 : b.id === 'system' ? 1 : a.createdAt - b.createdAt));
+
+      foldersEl.innerHTML = '';
+      const chips = [
+        { id: 'all', label: 'All' },
+        { id: 'unfiled', label: 'Unfiled' },
+        ...folders.map((f) => ({ id: f.id, label: f.name })),
+      ];
+      for (const chip of chips) {
+        const btn = document.createElement('button');
+        btn.className = 'btn small' + (chip.id === activeFolderId ? ' accent' : ' secondary');
+        btn.textContent = chip.label;
+        btn.addEventListener('click', () => {
+          activeFolderId = chip.id;
+          refresh();
+        });
+        foldersEl.appendChild(btn);
+      }
+
+      const filtered =
+        activeFolderId === 'all'
+          ? assets
+          : activeFolderId === 'unfiled'
+          ? assets.filter((a) => !a.folderId)
+          : assets.filter((a) => a.folderId === activeFolderId);
+      const images = filtered.filter((a) => a.mime?.startsWith('image/')).sort((a, b) => b.createdAt - a.createdAt);
+
+      grid.innerHTML = '';
+      if (images.length === 0) {
+        grid.innerHTML = '<div class="empty-state">No images here. Upload one above.</div>';
+      }
+      for (const asset of images) {
+        const url = await getAssetUrl(asset.id);
+        const card = document.createElement('div');
+        card.className = 'card';
+        card.innerHTML = `<div class="thumb"><img src="${url}" /></div><div class="label"><span>${escapeHtml(asset.name)}</span></div>`;
+        card.addEventListener('click', () => close(asset));
+        grid.appendChild(card);
+      }
     }
-    for (const asset of assets) {
-      const url = await getAssetUrl(asset.id);
-      const card = document.createElement('div');
-      card.className = 'card';
-      card.innerHTML = `<div class="thumb"><img src="${url}" /></div><div class="label"><span>${escapeHtml(asset.name)}</span></div>`;
-      card.addEventListener('click', () => close(asset));
-      grid.appendChild(card);
-    }
+
+    await refresh();
   });
 }
 

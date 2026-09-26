@@ -132,6 +132,7 @@ export async function render(root, params) {
       scale: 0.18,
       baseScale: 0.18,
       hasShadow: false,
+      solid: false,
       z: nextZ(),
     };
     scene.entities.push(entity);
@@ -191,7 +192,8 @@ export async function render(root, params) {
         </label>
         ${
           entity.kind === 'object'
-            ? `<label class="row" style="gap:6px;"><input type="checkbox" id="ent-shadow" ${entity.hasShadow ? 'checked' : ''} /> Shadow</label>`
+            ? `<label class="row" style="gap:6px;"><input type="checkbox" id="ent-shadow" ${entity.hasShadow ? 'checked' : ''} /> Shadow</label>
+               <label class="row" style="gap:6px;"><input type="checkbox" id="ent-solid" ${entity.solid ? 'checked' : ''} /> Solid (blocks characters)</label>`
             : ''
         }
         ${entity.kind === 'character' ? '<div id="pose-sequence-editor"></div>' : ''}
@@ -211,6 +213,11 @@ export async function render(root, params) {
     });
     el.querySelector('#ent-shadow')?.addEventListener('change', async (e) => {
       entity.hasShadow = e.target.checked;
+      await save();
+      drawFrame();
+    });
+    el.querySelector('#ent-solid')?.addEventListener('change', async (e) => {
+      entity.solid = e.target.checked;
       await save();
       drawFrame();
     });
@@ -306,13 +313,13 @@ export async function render(root, params) {
   // the standard frame — this mirrors exactly what SceneRuntime.render()
   // itself uses in that mode, so hit-testing/dragging line up with what's drawn.
   function transform() {
-    return getWorldTransform(runtime?.worldWidth || REF_WIDTH, STAGE_WIDTH, STAGE_HEIGHT, true);
+    return getWorldTransform(runtime?.worldWidth || REF_WIDTH, runtime?.worldHeight || REF_HEIGHT, STAGE_WIDTH, STAGE_HEIGHT, true);
   }
 
   function entityBounds(entity) {
-    const { scale, offsetY } = transform();
-    const originX = entity.x * scale;
-    const originY = entity.y * scale + offsetY;
+    const { scale, offsetX, offsetY } = transform();
+    const originX = offsetX + entity.x * scale;
+    const originY = offsetY + entity.y * scale;
     const size = entity.scale * REF_HEIGHT * scale;
     if (entity.kind === 'character') {
       return { left: originX - size * 0.4, right: originX + size * 0.4, top: originY - size * FEET_ANCHOR_Y, bottom: originY };
@@ -332,8 +339,8 @@ export async function render(root, params) {
   }
 
   function worldPointFromCanvas(pt) {
-    const { scale, offsetY } = transform();
-    return { x: pt.x / scale, y: (pt.y - offsetY) / scale };
+    const { scale, offsetX, offsetY } = transform();
+    return { x: (pt.x - offsetX) / scale, y: (pt.y - offsetY) / scale };
   }
 
   canvas.addEventListener('pointerdown', (e) => {
@@ -357,7 +364,12 @@ export async function render(root, params) {
     const entity = scene.entities.find((en) => en.id === dragState.id);
     if (!entity) return;
     const world = worldPointFromCanvas(pt);
-    const clamped = clampToBounds(world.x - dragState.offsetX, world.y - dragState.offsetY, runtime?.worldWidth || REF_WIDTH);
+    const clamped = clampToBounds(
+      world.x - dragState.offsetX,
+      world.y - dragState.offsetY,
+      runtime?.worldWidth || REF_WIDTH,
+      runtime?.worldHeight || REF_HEIGHT
+    );
     entity.x = clamped.x;
     entity.y = clamped.y;
     drawFrame();
