@@ -1,9 +1,10 @@
 // Thin promise-based wrapper around a single IndexedDB database.
-// Stores: assets (uploaded/sample images), characters, objects, scenes.
+// Stores: assets (uploaded/sample images), characters, objects, scenes,
+// folders (asset library organization).
 
 const DB_NAME = 'cartoonmaker';
-const DB_VERSION = 1;
-const STORES = ['assets', 'characters', 'objects', 'scenes'];
+const DB_VERSION = 2;
+const STORES = ['assets', 'characters', 'objects', 'scenes', 'folders'];
 
 let dbPromise = null;
 
@@ -83,13 +84,14 @@ export async function getAssetUrl(assetId) {
   return url;
 }
 
-export async function importAssetFile(file) {
+export async function importAssetFile(file, folderId = null) {
   const id = uid('asset');
   const record = {
     id,
     name: file.name || 'untitled',
     mime: file.type || 'image/png',
     blob: file,
+    folderId,
     createdAt: Date.now(),
   };
   await putRecord('assets', record);
@@ -99,12 +101,12 @@ export async function importAssetFile(file) {
 // Register a sample asset (bundled with the app) into the asset store the
 // first time the app runs, so scenes/characters can reference it by id like
 // any uploaded asset.
-export async function importAssetFromUrl(url, name, id) {
+export async function importAssetFromUrl(url, name, id, folderId = null) {
   const existing = await getRecord('assets', id);
   if (existing) return existing;
   const res = await fetch(url);
   const blob = await res.blob();
-  const record = { id, name, mime: blob.type || 'image/png', blob, createdAt: Date.now() };
+  const record = { id, name, mime: blob.type || 'image/png', blob, folderId, createdAt: Date.now() };
   await putRecord('assets', record);
   return record;
 }

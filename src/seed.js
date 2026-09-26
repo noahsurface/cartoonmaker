@@ -56,9 +56,10 @@ export const FX_ASSET_IDS = {
 
 export const SAMPLE_CHARACTER_ID = BUNDLED_CHARACTERS[0].id;
 export const SAMPLE_SCENE_ID = 'sample-scene-starter';
+export const SYSTEM_FOLDER_ID = 'system';
 
-async function ensureAsset(id, name, path) {
-  return importAssetFromUrl(BASE + path, name, id);
+async function ensureAsset(id, name, path, folderId = null) {
+  return importAssetFromUrl(BASE + path, name, id, folderId);
 }
 
 async function seedCharacterAssets(spec) {
@@ -126,13 +127,18 @@ async function seedObjectRecord(spec) {
 }
 
 export async function seedSampleContent() {
+  const existingSystemFolder = await getRecord('folders', SYSTEM_FOLDER_ID);
+  if (!existingSystemFolder) {
+    await putRecord('folders', { id: SYSTEM_FOLDER_ID, name: 'System', createdAt: Date.now() });
+  }
+
   await Promise.all([
     ensureAsset(BACKGROUND_ASSET_ID, 'Roadside background', 'background.png'),
-    ensureAsset(FX_ASSET_IDS.shadow, 'Character shadow', 'fx/shadow.png'),
-    ensureAsset(FX_ASSET_IDS.bubble[0], 'Speech bubble 1', 'fx/speech-bubble-000.png'),
-    ensureAsset(FX_ASSET_IDS.bubble[1], 'Speech bubble 2', 'fx/speech-bubble-001.png'),
-    ensureAsset(FX_ASSET_IDS.bubble[2], 'Speech bubble 3', 'fx/speech-bubble-002.png'),
-    ensureAsset(FX_ASSET_IDS.bubble[3], 'Speech bubble 4', 'fx/speech-bubble-003.png'),
+    ensureAsset(FX_ASSET_IDS.shadow, 'Character shadow', 'fx/shadow.png', SYSTEM_FOLDER_ID),
+    ensureAsset(FX_ASSET_IDS.bubble[0], 'Speech bubble 1', 'fx/speech-bubble-000.png', SYSTEM_FOLDER_ID),
+    ensureAsset(FX_ASSET_IDS.bubble[1], 'Speech bubble 2', 'fx/speech-bubble-001.png', SYSTEM_FOLDER_ID),
+    ensureAsset(FX_ASSET_IDS.bubble[2], 'Speech bubble 3', 'fx/speech-bubble-002.png', SYSTEM_FOLDER_ID),
+    ensureAsset(FX_ASSET_IDS.bubble[3], 'Speech bubble 4', 'fx/speech-bubble-003.png', SYSTEM_FOLDER_ID),
     ...BUNDLED_CHARACTERS.map(async (spec) => {
       const assetIds = await seedCharacterAssets(spec);
       await seedCharacterRecord(spec, assetIds);
@@ -201,6 +207,22 @@ export async function migrateLegacySampleCharacterName() {
         }
       }
       if (changed) await putRecord('scenes', scene);
+    }
+  }
+}
+
+// One-time fixup for browsers that already had the shared shadow/speech-bubble
+// assets saved before folders existed — seedSampleContent() only assigns a
+// folder at creation time (its ensureAsset early-returns for an asset that
+// already exists), so already-installed browsers need these patched in place
+// to land in the new System folder like a fresh install gets automatically.
+export async function migrateFxAssetsIntoSystemFolder() {
+  const fxIds = [FX_ASSET_IDS.shadow, ...FX_ASSET_IDS.bubble];
+  for (const id of fxIds) {
+    const asset = await getRecord('assets', id);
+    if (asset && asset.folderId !== SYSTEM_FOLDER_ID) {
+      asset.folderId = SYSTEM_FOLDER_ID;
+      await putRecord('assets', asset);
     }
   }
 }

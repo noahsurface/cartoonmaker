@@ -11,6 +11,12 @@ function blankLayer() {
   return { frames: [], roles: {} };
 }
 
+function resolveRoleFrame(layer, roleKey) {
+  if (!layer) return null;
+  const frameId = layer.roles?.[roleKey];
+  return layer.frames?.find((f) => f.id === frameId) || layer.frames?.[0] || null;
+}
+
 function blankCharacter(name) {
   const poseId = uid('pose');
   return {
@@ -72,13 +78,22 @@ export async function render(root, params) {
     for (const character of characters) {
       const { poses, order } = getCharacterPoses(character);
       const firstPose = poses[order[0]];
-      const idleId = firstPose?.roles?.idle;
-      const idleFrame = firstPose?.frames?.find((f) => f.id === idleId) || firstPose?.frames?.[0];
-      const url = idleFrame ? await getAssetUrl(idleFrame.assetId) : null;
+      const idleFrame = resolveRoleFrame(firstPose, 'idle');
+      const mouthFrame = resolveRoleFrame(character.layers?.mouth, 'silent');
+      const eyesFrame = resolveRoleFrame(character.layers?.eyes, 'forward');
+      // Composite body + mouth + eyes (same draw order as drawCharacterBody)
+      // so the thumbnail shows the character's fully assembled resting look,
+      // not just a bare body with no face — every layer shares the same
+      // pre-aligned canvas size, so simple stacking lines them up correctly.
+      const layerUrls = (
+        await Promise.all([idleFrame, mouthFrame, eyesFrame].map((f) => (f ? getAssetUrl(f.assetId) : null)))
+      ).filter(Boolean);
       const card = document.createElement('div');
       card.className = 'card';
       card.innerHTML = `
-        <div class="thumb">${url ? `<img src="${url}" />` : '<span style="font-size:2rem">🧑</span>'}</div>
+        <div class="thumb${layerUrls.length > 1 ? ' layered' : ''}">${
+          layerUrls.length ? layerUrls.map((url) => `<img src="${url}" />`).join('') : '<span style="font-size:2rem">🧑</span>'
+        }</div>
         <div class="label"><span>${escapeHtml(character.name)}</span>
           <button class="btn danger small icon-only" data-del>✕</button>
         </div>`;

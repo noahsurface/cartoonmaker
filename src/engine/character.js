@@ -143,6 +143,8 @@ export class CharacterAnimState {
     this.talking = false;
     this.talkClock = 0;
     this.activePoseId = null;
+    this._priorPoseId = null;
+    this.poseFlipT = 1; // 1 = settled, not mid pose-swap
     this._hasSample = false;
   }
 
@@ -178,6 +180,20 @@ export class CharacterAnimState {
       this.flipT = Math.min(1, this.flipT + dt / FLIP_DURATION);
     }
 
+    // A pose change plays the same paper-flip transition as a direction
+    // change, but must land back on the *same* facing rather than the
+    // opposite one — see poseFlipScale below. Skipped entirely when the
+    // sequence steps to a pose that's already active (e.g. idle -> idle),
+    // per spec: an identical next pose shouldn't flip.
+    if (this._hasSample && this.activePoseId != null && activePoseId !== this.activePoseId) {
+      this._priorPoseId = this.activePoseId;
+      this.poseFlipT = 0;
+    }
+    this.activePoseId = activePoseId;
+    if (this.poseFlipT < 1) {
+      this.poseFlipT = Math.min(1, this.poseFlipT + dt / FLIP_DURATION);
+    }
+
     if (this.moving) {
       this.walkPhase += dt * SWAY_CYCLE_HZ * Math.PI * 2;
     } else {
@@ -205,7 +221,6 @@ export class CharacterAnimState {
     if (mouthHeld && !this.talking) this.talkClock = 0;
     this.talking = mouthHeld;
     if (mouthHeld) this.talkClock += dt;
-    this.activePoseId = activePoseId;
 
     this.x = x;
     this.y = y;
@@ -231,6 +246,23 @@ export class CharacterAnimState {
 
   get bubbleFrameIndex() {
     return Math.floor(this.talkClock * BUBBLE_FPS) % 4;
+  }
+
+  /** Which pose's body art should actually be drawn right now — lags behind
+   * `activePoseId` (which updates immediately, same as `facing` does for a
+   * direction change) until the pose-flip transition reaches its edge-on
+   * midpoint, so the swap is hidden behind the flip instead of popping while
+   * still fully visible. */
+  get displayPoseId() {
+    return this.poseFlipT < 0.5 ? this._priorPoseId ?? this.activePoseId : this.activePoseId;
+  }
+
+  /** Multiplier (1 normally) applied on top of `scaleX` during a pose-change
+   * flip: shrinks to edge-on and back out to the *same* sign, unlike the
+   * direction-change flip which ends at the opposite sign — a pose swap
+   * shouldn't also change which way the character is facing. */
+  get poseFlipScale() {
+    return this.poseFlipT >= 1 ? 1 : Math.abs(Math.cos(this.poseFlipT * Math.PI));
   }
 }
 
@@ -268,7 +300,7 @@ export function drawCharacterBody(ctx, state, sprites, geom, fx = {}) {
   ctx.save();
   ctx.translate(originX, feetPivotY(state, geom));
   ctx.rotate(state.swayAngle);
-  ctx.scale(state.scaleX, 1);
+  ctx.scale(state.scaleX * state.poseFlipScale, 1);
   const half = size / 2;
   const top = -size * FEET_ANCHOR_Y;
   ctx.drawImage(bodyImg, -half, top, size, size);

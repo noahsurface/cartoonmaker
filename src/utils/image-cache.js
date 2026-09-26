@@ -35,40 +35,52 @@ export async function preloadMany(assetIds) {
   await Promise.all(unique.map(preloadImage));
 }
 
-// How wide an image's actual (non-transparent) content is, as a fraction of
-// its full canvas width — used to size the shadow to the character's real
-// silhouette rather than the padded square the art is drawn on. Computed
-// once per image and cached, since scanning pixels every frame would be
-// wasteful and the art doesn't change.
-const widthFractionCache = new WeakMap();
+// How much of an image's canvas its actual (non-transparent) content
+// occupies — used to size a shadow to a character/object's real silhouette
+// width rather than the padded square the art is drawn on, and to anchor a
+// shadow at an object's actual visual base rather than the bottom edge of
+// its (possibly padded) image file. Computed once per image and cached,
+// since scanning pixels every frame would be wasteful and the art doesn't
+// change.
+//
+// - widthFraction: content width / full image width.
+// - bottomFraction: how far down the content's lowest non-transparent pixel
+//   sits, as a fraction of the full image height (1 = touches the very
+//   bottom row, i.e. no padding below the visible content).
+const contentMetricsCache = new WeakMap();
 
-export function getContentWidthFraction(img) {
-  if (!img || !img.width || !img.height) return 1;
-  if (widthFractionCache.has(img)) return widthFractionCache.get(img);
+export function getContentMetrics(img) {
+  if (!img || !img.width || !img.height) return { widthFraction: 1, bottomFraction: 1 };
+  if (contentMetricsCache.has(img)) return contentMetricsCache.get(img);
   const canvas = document.createElement('canvas');
   canvas.width = img.width;
   canvas.height = img.height;
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   ctx.drawImage(img, 0, 0);
-  let fraction = 1;
+  let widthFraction = 1;
+  let bottomFraction = 1;
   try {
     const { data } = ctx.getImageData(0, 0, img.width, img.height);
     let minX = img.width;
     let maxX = -1;
+    let maxY = -1;
     for (let y = 0; y < img.height; y++) {
       const rowStart = y * img.width;
       for (let x = 0; x < img.width; x++) {
         if (data[(rowStart + x) * 4 + 3] > 10) {
           if (x < minX) minX = x;
           if (x > maxX) maxX = x;
+          if (y > maxY) maxY = y;
         }
       }
     }
-    if (maxX >= minX) fraction = (maxX - minX + 1) / img.width;
+    if (maxX >= minX) widthFraction = (maxX - minX + 1) / img.width;
+    if (maxY >= 0) bottomFraction = (maxY + 1) / img.height;
   } catch (err) {
-    // Cross-origin or otherwise unreadable canvas — fall back to the full width.
-    console.warn('Could not measure image content width', err);
+    // Cross-origin or otherwise unreadable canvas — fall back to the full image bounds.
+    console.warn('Could not measure image content bounds', err);
   }
-  widthFractionCache.set(img, fraction);
-  return fraction;
+  const metrics = { widthFraction, bottomFraction };
+  contentMetricsCache.set(img, metrics);
+  return metrics;
 }

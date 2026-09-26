@@ -2,13 +2,13 @@
 // track, and resolves what that track (or any other already-recorded track)
 // should look like at an arbitrary playback time. Positions are absolute
 // pixels in the shared 2560x1440 reference space (see engine/coords.js).
-import { clampToBounds, REF_WIDTH } from './coords.js';
+import { clampToBounds, REF_WIDTH, REF_HEIGHT } from './coords.js';
 
 const MAX_SPEED = 500; // px/sec
 const ACCEL = 2000; // px/sec^2, used for both speeding up and slowing down
 
 export class TrackRecorder {
-  constructor(startX, startY, worldWidth = REF_WIDTH) {
+  constructor(startX, startY, worldWidth = REF_WIDTH, worldHeight = REF_HEIGHT, obstacles = []) {
     this.samples = [];
     this.startedAt = null;
     this.x = startX;
@@ -16,6 +16,11 @@ export class TrackRecorder {
     this.vx = 0;
     this.vy = 0;
     this.worldWidth = worldWidth;
+    this.worldHeight = worldHeight;
+    // Static ground-footprint rectangles (reference-space) for solid
+    // objects, computed once at record-start since objects don't move — see
+    // SceneRuntime.getSolidObstacles().
+    this.obstacles = obstacles;
   }
 
   start() {
@@ -35,11 +40,24 @@ export class TrackRecorder {
     this.vx = moveToward(this.vx, targetVx, ACCEL * dt);
     this.vy = moveToward(this.vy, targetVy, ACCEL * dt);
 
-    const next = clampToBounds(this.x + this.vx * dt, this.y + this.vy * dt, this.worldWidth);
+    let next = clampToBounds(this.x + this.vx * dt, this.y + this.vy * dt, this.worldWidth, this.worldHeight);
     // If we hit a bound, stop the velocity on that axis instead of pinning
     // against it at full speed (which would cause a jarring re-launch).
     if (next.x !== this.x + this.vx * dt) this.vx = 0;
     if (next.y !== this.y + this.vy * dt) this.vy = 0;
+
+    // Solid objects are treated as walls: pushed back out along whichever
+    // edge of the obstacle's footprint is nearest, zeroing velocity on
+    // whichever axis that push happened on (same "stop, don't relaunch"
+    // treatment as the world-edge clamp above).
+    for (const rect of this.obstacles) {
+      const pushed = pushOutOfRect(next.x, next.y, rect);
+      if (!pushed) continue;
+      if (pushed.x !== next.x) this.vx = 0;
+      if (pushed.y !== next.y) this.vy = 0;
+      next = pushed;
+    }
+
     this.x = next.x;
     this.y = next.y;
 
@@ -58,6 +76,21 @@ function moveToward(current, target, maxDelta) {
   const diff = target - current;
   if (Math.abs(diff) <= maxDelta) return target;
   return current + Math.sign(diff) * maxDelta;
+}
+
+/** If (x,y) is inside rect, push it back out along whichever edge is
+ * nearest (a simple, cheap AABB resolution — fine for a handful of static
+ * obstacles). Returns null if (x,y) isn't inside the rect at all. */
+function pushOutOfRect(x, y, rect) {
+  if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) return null;
+  const distances = [
+    { d: x - rect.left, x: rect.left, y },
+    { d: rect.right - x, x: rect.right, y },
+    { d: y - rect.top, x, y: rect.top },
+    { d: rect.bottom - y, x, y: rect.bottom },
+  ];
+  distances.sort((a, b) => a.d - b.d);
+  return { x: distances[0].x, y: distances[0].y };
 }
 
 /** Sample an already-recorded track at time t (seconds), interpolating position. */
