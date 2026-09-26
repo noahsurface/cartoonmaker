@@ -56,7 +56,10 @@ export async function render(root, params) {
     </div>
     <div class="puppet-layout">
       <div class="stack">
-        <div class="stage-wrap"><canvas id="stage" width="${STAGE_WIDTH}" height="${STAGE_HEIGHT}"></canvas></div>
+        <div class="stage-wrap">
+          <canvas id="stage" width="${STAGE_WIDTH}" height="${STAGE_HEIGHT}"></canvas>
+          <div class="countdown-overlay" id="countdown-overlay" style="display:none;"></div>
+        </div>
         <div class="panel">
           <div class="row between">
             <strong>Dialogue audio</strong>
@@ -109,6 +112,7 @@ export async function render(root, params) {
 
   const canvas = root.querySelector('#stage');
   const ctx = canvas.getContext('2d');
+  const countdownOverlay = root.querySelector('#countdown-overlay');
   const armedSelect = root.querySelector('#armed-select');
   const recordBtn = root.querySelector('#record-btn');
   const stopBtn = root.querySelector('#stop-record-btn');
@@ -306,17 +310,40 @@ export async function render(root, params) {
     }
   }
 
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  let countdownCancelled = false;
+
   recordBtn.addEventListener('click', async () => {
     if (mode !== 'idle') return;
+    mode = 'countdown';
+    countdownCancelled = false;
+    armedSelect.disabled = true;
+    recordBtn.disabled = true;
+    stopBtn.disabled = false;
+    recordStatus.innerHTML = '';
+    countdownOverlay.style.display = 'flex';
+    // Gives the user a moment between clicking Record and readying their
+    // keyboard/gamepad — cancelable via Stop, same as an in-progress recording.
+    for (let n = 3; n >= 1; n--) {
+      countdownOverlay.textContent = String(n);
+      await sleep(1000);
+      if (countdownCancelled) {
+        countdownOverlay.style.display = 'none';
+        mode = 'idle';
+        armedSelect.disabled = false;
+        recordBtn.disabled = false;
+        stopBtn.disabled = true;
+        return;
+      }
+    }
+    countdownOverlay.style.display = 'none';
+
     mode = 'recording';
     sceneTime = 0;
     refreshPoseSequenceForArmed();
     const entity = characterEntities.find((e) => e.id === armedEntityId);
     recorder = new TrackRecorder(entity.x, entity.y, runtime.worldWidth, runtime.worldHeight, runtime.getSolidObstacles());
     recorder.start();
-    armedSelect.disabled = true;
-    recordBtn.disabled = true;
-    stopBtn.disabled = false;
     recordStatus.innerHTML = `<div class="status-line"><span class="dot-indicator rec"></span> Recording ${escapeHtml(entity.name)}…</div>`;
     stopLoop();
     syncAudioToTime(0, true);
@@ -324,6 +351,10 @@ export async function render(root, params) {
   });
 
   stopBtn.addEventListener('click', async () => {
+    if (mode === 'countdown') {
+      countdownCancelled = true;
+      return;
+    }
     if (mode !== 'recording') return;
     stopLoop();
     dialogueAudioEl.pause();
@@ -361,6 +392,7 @@ export async function render(root, params) {
     mode = 'idle';
   });
   root.querySelector('#restart-btn').addEventListener('click', () => {
+    if (mode === 'countdown' || mode === 'recording') return;
     stopLoop();
     dialogueAudioEl.pause();
     mode = 'idle';
