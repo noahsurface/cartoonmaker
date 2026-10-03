@@ -26,11 +26,13 @@ export class SceneRuntime {
    * @param {object} scene
    * @param {Map<string,object>} characterById
    * @param {Map<string,object>} objectById
+   * @param {Map<string,object>} stickerById
    */
-  constructor(scene, characterById, objectById) {
+  constructor(scene, characterById, objectById, stickerById = new Map()) {
     this.scene = scene;
     this.characterById = characterById;
     this.objectById = objectById;
+    this.stickerById = stickerById;
     this.animStates = new Map();
     this.fx = { shadowImg: null, bubbleFrames: [] };
     this.shadowWidthFractionByCharacterId = new Map();
@@ -55,6 +57,9 @@ export class SceneRuntime {
       } else if (entity.kind === 'object') {
         const obj = this.objectById.get(entity.refId);
         if (obj) jobs.push(preloadImage(obj.assetId));
+      } else if (entity.kind === 'sticker') {
+        const sticker = this.stickerById.get(entity.refId);
+        if (sticker) jobs.push(preloadImage(sticker.assetId));
       }
     }
     await Promise.all(jobs);
@@ -152,7 +157,7 @@ export class SceneRuntime {
     // The scene editor's manual z only breaks ties (e.g. two things placed
     // at exactly the same y).
     const resolved = this.scene.entities.map((entity) => {
-      if (entity.kind === 'character') {
+      if (entity.kind === 'character' || entity.kind === 'sticker') {
         const sample = resolvePose ? resolvePose(entity.id) : null;
         return { entity, x: sample ? sample.x : entity.x, y: sample ? sample.y : entity.y, sample };
       }
@@ -247,6 +252,33 @@ export class SceneRuntime {
           const contentBottomY = oy - dh * (1 - bottomFraction);
           ctx.drawImage(this.fx.shadowImg, ox - shadowW / 2, contentBottomY - shadowH / 2, shadowW, shadowH);
         }
+        ctx.drawImage(img, ox - dw / 2, oy - dh, dw, dh);
+        if (entity.id === highlightEntityId) {
+          ctx.save();
+          ctx.strokeStyle = '#2fa8ff';
+          ctx.lineWidth = 3;
+          ctx.setLineDash([8, 6]);
+          ctx.strokeRect(ox - dw / 2, oy - dh, dw, dh);
+          ctx.restore();
+        }
+      } else if (entity.kind === 'sticker') {
+        // Unlike a character, a sticker with no recorded track yet defaults
+        // to *invisible* rather than shown at its placed position — it's
+        // meant to pop into the scene at a chosen moment, not be on screen
+        // from the start. fullWorld (the scene editor) always shows it
+        // regardless, since that's where its starting position gets placed.
+        const visible = !!opts.fullWorld || sample?.visible === true;
+        if (!visible) continue;
+        const sticker = this.stickerById.get(entity.refId);
+        if (!sticker) continue;
+        const img = getCachedImage(sticker.assetId);
+        if (!img) continue;
+        const size = entity.scale * REF_HEIGHT * scale;
+        const aspect = img.width / img.height || 1;
+        const dw = size * aspect;
+        const dh = size;
+        const ox = offsetX + (x - camX) * scale;
+        const oy = offsetY + (y - camY) * scale;
         ctx.drawImage(img, ox - dw / 2, oy - dh, dw, dh);
         if (entity.id === highlightEntityId) {
           ctx.save();

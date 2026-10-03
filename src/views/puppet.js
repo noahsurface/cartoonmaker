@@ -13,31 +13,41 @@ export async function render(root, params) {
     root.innerHTML = `<div class="panel"><h2>Scene not found</h2><a href="#/scenes">Back to scenes</a></div>`;
     return;
   }
-  const [characters, objects] = await Promise.all([getAll('characters'), getAll('objects')]);
+  const [characters, objects, stickers] = await Promise.all([getAll('characters'), getAll('objects'), getAll('stickers')]);
   const characterById = new Map(characters.map((c) => [c.id, c]));
   const objectById = new Map(objects.map((o) => [o.id, o]));
-  const characterEntities = scene.entities.filter((e) => e.kind === 'character');
+  const stickerById = new Map(stickers.map((s) => [s.id, s]));
+  // Characters and stickers are both puppeteered live and recorded into a
+  // track the same way — see engine/recorder.js — so they share one armed/
+  // recordable list. Plain objects are static and never appear here.
+  const recordableEntities = scene.entities.filter((e) => e.kind === 'character' || e.kind === 'sticker');
 
-  if (characterEntities.length === 0) {
+  if (recordableEntities.length === 0) {
     root.innerHTML = `
       <div class="panel">
         <h1>Animate</h1>
-        <p>This scene has no characters yet.</p>
-        <button class="btn accent" id="go-edit">Add characters in the scene editor</button>
+        <p>This scene has no characters or stickers yet.</p>
+        <button class="btn accent" id="go-edit">Add characters or stickers in the scene editor</button>
       </div>`;
     root.querySelector('#go-edit').addEventListener('click', () => navigate('editor', { id: scene.id }));
     return;
   }
 
-  let armedEntityId = characterEntities.find((e) => !scene.tracks[e.id])?.id || characterEntities[0].id;
+  let armedEntityId = recordableEntities.find((e) => !scene.tracks[e.id])?.id || recordableEntities[0].id;
   let mode = 'idle'; // 'idle' | 'recording' | 'previewing'
   let sceneTime = 0;
   let recorder = null;
   // The armed entity's pose sequence and where we currently are in it —
   // stepped by LB/RB (or [ / ]) only while actually recording, mirroring how
-  // movement/talk are also only live during a take.
+  // movement/talk are also only live during a take. Only meaningful for
+  // characters; stays empty for a sticker.
   let poseSequence = [];
   let currentPoseIndex = 0;
+  // Edge-triggered appear/disappear state for a sticker recording — Space/A
+  // (the same signal used as "talk" for a character) flips this on each
+  // rising edge instead of being held like talk is. Reset per recording.
+  let stickerVisible = false;
+  let prevMouthHeld = false;
   const input = new InputSource();
   let runtime = null;
   let rafHandle = null;
@@ -89,12 +99,7 @@ export async function render(root, params) {
       <div class="hud panel">
         <h2 style="margin-top:0">Controller</h2>
         <div class="status-line"><span class="dot-indicator" id="gp-dot"></span> <span id="gp-status">Checking for gamepad…</span></div>
-        <div class="dpad-help">
-          Move: <span class="kbd">arrow keys</span> / <span class="kbd">WASD</span> or stick / d-pad<br/>
-          Talk (hold): <span class="kbd">Space</span> or face button A / right trigger<br/>
-          Switch pose: <span class="kbd">[</span> / <span class="kbd">]</span> or left/right bumper<br/>
-          <em>Eye direction and blinking are automatic.</em>
-        </div>
+        <div class="dpad-help" id="dpad-help"></div>
         <h2>Who's up?</h2>
         <select id="armed-select"></select>
         <div class="row" style="margin-top:6px;">
@@ -128,8 +133,23 @@ export async function render(root, params) {
   const waveformCtx = waveformCanvas.getContext('2d');
   const audioLabel = root.querySelector('#audio-label');
 
+  const dpadHelpEl = root.querySelector('#dpad-help');
+
+  function refreshDpadHelp() {
+    const entity = recordableEntities.find((e) => e.id === armedEntityId);
+    const toggleLine = entity?.kind === 'sticker'
+      ? 'Appear / disappear (press): <span class="kbd">Space</span> or face button A / right trigger<br/>'
+      : 'Talk (hold): <span class="kbd">Space</span> or face button A / right trigger<br/>' +
+        'Switch pose: <span class="kbd">[</span> / <span class="kbd">]</span> or left/right bumper<br/>';
+    dpadHelpEl.innerHTML = `
+      Move: <span class="kbd">arrow keys</span> / <span class="kbd">WASD</span> or stick / d-pad<br/>
+      ${toggleLine}
+      <em>${entity?.kind === 'sticker' ? 'Starts hidden — press once to make it appear, again to hide it.' : 'Eye direction and blinking are automatic.'}</em>
+    `;
+  }
+
   function refreshArmedSelect() {
-    armedSelect.innerHTML = characterEntities
+    armedSelect.innerHTML = recordableEntities
       .map((e) => `<option value="${e.id}" ${e.id === armedEntityId ? 'selected' : ''}>${escapeHtml(e.name)}${scene.tracks[e.id] ? ' (recorded)' : ''}</option>`)
       .join('');
   }
@@ -137,7 +157,7 @@ export async function render(root, params) {
   function refreshTrackList() {
     const maxDuration = Math.max(sceneDuration(scene), 0.001);
     perTrackList.innerHTML = '';
-    for (const entity of characterEntities) {
+    for (const entity of recordableEntities) {
       const track = scene.tracks[entity.id];
       const pct = track ? Math.min(100, (track.duration / maxDuration) * 100) : 0;
       const row = document.createElement('div');
@@ -209,8 +229,14 @@ export async function render(root, params) {
   const poseStatusEl = root.querySelector('#pose-status');
 
   function refreshPoseSequenceForArmed() {
-    const entity = characterEntities.find((e) => e.id === armedEntityId);
-    const character = entity ? characterById.get(entity.refId) : null;
+    const entity = recordableEntities.find((e) => e.id === armedEntityId);
+    if (entity?.kind !== 'character') {
+      poseSequence = [];
+      currentPoseIndex = 0;
+      updatePoseStatus();
+      return;
+    }
+    const character = characterById.get(entity.refId);
     const { order } = getCharacterPoses(character || {});
     poseSequence = entity?.poseSequence?.length ? entity.poseSequence : [order[0]];
     currentPoseIndex = 0;
@@ -218,21 +244,27 @@ export async function render(root, params) {
   }
 
   function updatePoseStatus() {
-    const entity = characterEntities.find((e) => e.id === armedEntityId);
-    const character = entity ? characterById.get(entity.refId) : null;
+    const entity = recordableEntities.find((e) => e.id === armedEntityId);
+    if (entity?.kind !== 'character' || poseSequence.length <= 1) {
+      poseStatusEl.textContent = '';
+      return;
+    }
+    const character = characterById.get(entity.refId);
     const { poses } = getCharacterPoses(character || {});
     const poseId = poseSequence[currentPoseIndex];
-    poseStatusEl.textContent = poseSequence.length > 1 ? `Pose: ${poses[poseId]?.name || '?'} (${currentPoseIndex + 1}/${poseSequence.length})` : '';
+    poseStatusEl.textContent = `Pose: ${poses[poseId]?.name || '?'} (${currentPoseIndex + 1}/${poseSequence.length})`;
   }
 
   armedSelect.addEventListener('change', () => {
     armedEntityId = armedSelect.value;
     refreshPoseSequenceForArmed();
+    refreshDpadHelp();
   });
   refreshPoseSequenceForArmed();
+  refreshDpadHelp();
 
   async function rebuildRuntime() {
-    runtime = new SceneRuntime(scene, characterById, objectById);
+    runtime = new SceneRuntime(scene, characterById, objectById, stickerById);
     await runtime.preload();
     drawStatic(0);
   }
@@ -273,14 +305,28 @@ export async function render(root, params) {
     if (mode === 'recording') {
       sceneTime += dt;
       const sample = input.sample();
-      if (sample.poseStep) {
-        currentPoseIndex = (currentPoseIndex + sample.poseStep + poseSequence.length) % poseSequence.length;
-        updatePoseStatus();
+      const armedEntity = recordableEntities.find((e) => e.id === armedEntityId);
+      let extra;
+      let overlay;
+      if (armedEntity.kind === 'sticker') {
+        // Edge-triggered: flip visibility only on the rising edge of the
+        // same "talk" signal, not while it's held.
+        if (sample.mouthHeld && !prevMouthHeld) stickerVisible = !stickerVisible;
+        prevMouthHeld = sample.mouthHeld;
+        extra = { visible: stickerVisible };
+        overlay = { visible: stickerVisible };
+      } else {
+        if (sample.poseStep) {
+          currentPoseIndex = (currentPoseIndex + sample.poseStep + poseSequence.length) % poseSequence.length;
+          updatePoseStatus();
+        }
+        const activePoseId = poseSequence[currentPoseIndex];
+        extra = { mouthHeld: sample.mouthHeld, poseId: activePoseId };
+        overlay = { mouthHeld: sample.mouthHeld, poseId: activePoseId };
       }
-      const activePoseId = poseSequence[currentPoseIndex];
-      const { x, y } = recorder.step(sample.dx, sample.dy, dt, sample.mouthHeld, activePoseId);
+      const { x, y } = recorder.step(sample.dx, sample.dy, dt, extra);
       runtime.render(ctx, dt, (entityId) => {
-        if (entityId === armedEntityId) return { x, y, mouthHeld: sample.mouthHeld, poseId: activePoseId };
+        if (entityId === armedEntityId) return { x, y, ...overlay };
         const track = scene.tracks[entityId];
         return track ? sampleTrackAt(track, sceneTime) : null;
       }, armedEntityId);
@@ -341,8 +387,18 @@ export async function render(root, params) {
     mode = 'recording';
     sceneTime = 0;
     refreshPoseSequenceForArmed();
-    const entity = characterEntities.find((e) => e.id === armedEntityId);
-    recorder = new TrackRecorder(entity.x, entity.y, runtime.worldWidth, runtime.worldHeight, runtime.getSolidObstacles());
+    const entity = recordableEntities.find((e) => e.id === armedEntityId);
+    const isSticker = entity.kind === 'sticker';
+    stickerVisible = false;
+    prevMouthHeld = false;
+    recorder = new TrackRecorder(
+      entity.x,
+      entity.y,
+      runtime.worldWidth,
+      runtime.worldHeight,
+      isSticker ? [] : runtime.getSolidObstacles(),
+      !isSticker
+    );
     recorder.start();
     recordStatus.innerHTML = `<div class="status-line"><span class="dot-indicator rec"></span> Recording ${escapeHtml(entity.name)}…</div>`;
     stopLoop();
@@ -366,13 +422,14 @@ export async function render(root, params) {
     armedSelect.disabled = false;
     recordBtn.disabled = false;
     stopBtn.disabled = true;
-    const recordedName = characterEntities.find((e) => e.id === armedEntityId)?.name || 'character';
+    const recordedName = recordableEntities.find((e) => e.id === armedEntityId)?.name || 'entity';
     recordStatus.innerHTML = `<div class="notice success">Saved ${track.duration.toFixed(1)}s for ${escapeHtml(recordedName)}.</div>`;
-    const next = characterEntities.find((e) => !scene.tracks[e.id]);
+    const next = recordableEntities.find((e) => !scene.tracks[e.id]);
     if (next) armedEntityId = next.id;
     refreshArmedSelect();
     refreshTrackList();
     refreshPoseSequenceForArmed();
+    refreshDpadHelp();
     sceneTime = 0;
     drawStatic(0);
   });

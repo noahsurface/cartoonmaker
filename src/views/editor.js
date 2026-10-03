@@ -14,9 +14,10 @@ export async function render(root, params) {
     return;
   }
 
-  const [characters, objects] = await Promise.all([getAll('characters'), getAll('objects')]);
+  const [characters, objects, stickers] = await Promise.all([getAll('characters'), getAll('objects'), getAll('stickers')]);
   const characterById = new Map(characters.map((c) => [c.id, c]));
   const objectById = new Map(objects.map((o) => [o.id, o]));
+  const stickerById = new Map(stickers.map((s) => [s.id, s]));
 
   let selectedEntityId = null;
   let runtime = null;
@@ -42,6 +43,8 @@ export async function render(root, params) {
           <button class="btn" id="add-character-btn">+ Add character</button>
           <select id="add-object-select"></select>
           <button class="btn" id="add-object-btn">+ Add object</button>
+          <select id="add-sticker-select"></select>
+          <button class="btn" id="add-sticker-btn">+ Add sticker</button>
         </div>
         <h2>Camera</h2>
         <select id="camera-follow-select"></select>
@@ -72,6 +75,8 @@ export async function render(root, params) {
   charSelect.innerHTML = characters.map((c) => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('') || '<option value="">(no characters yet)</option>';
   const objSelect = root.querySelector('#add-object-select');
   objSelect.innerHTML = objects.map((o) => `<option value="${o.id}">${escapeHtml(o.name)}</option>`).join('') || '<option value="">(no objects yet)</option>';
+  const stickerSelect = root.querySelector('#add-sticker-select');
+  stickerSelect.innerHTML = stickers.map((s) => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('') || '<option value="">(no stickers yet)</option>';
 
   const cameraSelect = root.querySelector('#camera-follow-select');
   function refreshCameraSelect() {
@@ -141,6 +146,26 @@ export async function render(root, params) {
     selectEntity(entity.id);
   });
 
+  root.querySelector('#add-sticker-btn').addEventListener('click', async () => {
+    const stickerId = stickerSelect.value;
+    if (!stickerId) return alert('Create a sticker first, in the Characters tab.');
+    const entity = {
+      id: uid('entity'),
+      kind: 'sticker',
+      refId: stickerId,
+      name: stickerById.get(stickerId)?.name || 'Sticker',
+      x: 1280,
+      y: 1080,
+      scale: 0.2,
+      baseScale: 0.2,
+      z: nextZ(),
+    };
+    scene.entities.push(entity);
+    await save();
+    await rebuildRuntime();
+    selectEntity(entity.id);
+  });
+
   function nextZ() {
     return scene.entities.reduce((max, e) => Math.max(max, e.z ?? 0), 0) + 1;
   }
@@ -151,7 +176,7 @@ export async function render(root, params) {
   }
 
   async function rebuildRuntime() {
-    runtime = new SceneRuntime(scene, characterById, objectById);
+    runtime = new SceneRuntime(scene, characterById, objectById, stickerById);
     await runtime.preload();
     renderEntityList();
     drawFrame();
@@ -166,7 +191,8 @@ export async function render(root, params) {
     for (const entity of [...scene.entities].sort((a, b) => b.z - a.z)) {
       const row = document.createElement('div');
       row.className = 'entity-item' + (entity.id === selectedEntityId ? ' selected' : '');
-      row.innerHTML = `<span>${entity.kind === 'character' ? '🧑' : '📦'} ${escapeHtml(entity.name)}</span>`;
+      const icon = entity.kind === 'character' ? '🧑' : entity.kind === 'sticker' ? '⭐' : '📦';
+      row.innerHTML = `<span>${icon} ${escapeHtml(entity.name)}</span>`;
       row.addEventListener('click', () => selectEntity(entity.id));
       list.appendChild(row);
     }
@@ -324,8 +350,9 @@ export async function render(root, params) {
     if (entity.kind === 'character') {
       return { left: originX - size * 0.4, right: originX + size * 0.4, top: originY - size * FEET_ANCHOR_Y, bottom: originY };
     }
-    const obj = objectById.get(entity.refId);
-    const img = obj ? getCachedImage(obj.assetId) : null;
+    const lib = entity.kind === 'sticker' ? stickerById : objectById;
+    const item = lib.get(entity.refId);
+    const img = item ? getCachedImage(item.assetId) : null;
     const aspect = img ? img.width / img.height : 1;
     const dw = size * aspect;
     return { left: originX - dw / 2, right: originX + dw / 2, top: originY - size, bottom: originY };
@@ -368,7 +395,8 @@ export async function render(root, params) {
       world.x - dragState.offsetX,
       world.y - dragState.offsetY,
       runtime?.worldWidth || REF_WIDTH,
-      runtime?.worldHeight || REF_HEIGHT
+      runtime?.worldHeight || REF_HEIGHT,
+      entity.kind !== 'sticker'
     );
     entity.x = clamped.x;
     entity.y = clamped.y;

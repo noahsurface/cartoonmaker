@@ -16,10 +16,21 @@ const BOUNDS_X_MARGIN_FRACTION = 0.02;
 const BOUNDS_Y_MIN_FRACTION = 0.35;
 const BOUNDS_Y_MAX_FRACTION = 0.98;
 
-export function clampToBounds(x, y, worldWidth = REF_WIDTH, worldHeight = REF_HEIGHT) {
+/**
+ * @param {boolean} groundedY true (characters, the default) restricts y to the
+ *   walkable ground band below the horizon, like a character standing in the
+ *   scene. false (stickers) allows the full vertical extent of the world
+ *   (minus the same small edge margin used for x) — a sticker is a floating
+ *   overlay, not something standing on the ground, so it shouldn't be
+ *   confined to the same band (e.g. a thought-bubble sticker placed near the
+ *   top of the frame).
+ */
+export function clampToBounds(x, y, worldWidth = REF_WIDTH, worldHeight = REF_HEIGHT, groundedY = true) {
+  const yMin = groundedY ? BOUNDS_Y_MIN_FRACTION * worldHeight : BOUNDS_X_MARGIN_FRACTION * worldHeight;
+  const yMax = groundedY ? BOUNDS_Y_MAX_FRACTION * worldHeight : worldHeight - BOUNDS_X_MARGIN_FRACTION * worldHeight;
   return {
     x: Math.max(BOUNDS_X_MARGIN_FRACTION * worldWidth, Math.min(worldWidth - BOUNDS_X_MARGIN_FRACTION * worldWidth, x)),
-    y: Math.max(BOUNDS_Y_MIN_FRACTION * worldHeight, Math.min(BOUNDS_Y_MAX_FRACTION * worldHeight, y)),
+    y: Math.max(yMin, Math.min(yMax, y)),
   };
 }
 

@@ -1,10 +1,10 @@
 // Thin promise-based wrapper around a single IndexedDB database.
-// Stores: assets (uploaded/sample images), characters, objects, scenes,
-// folders (asset library organization).
+// Stores: assets (uploaded/sample images), characters, objects, stickers,
+// scenes, folders (asset library organization).
 
 const DB_NAME = 'cartoonmaker';
-const DB_VERSION = 2;
-const STORES = ['assets', 'characters', 'objects', 'scenes', 'folders'];
+const DB_VERSION = 3;
+const STORES = ['assets', 'characters', 'objects', 'stickers', 'scenes', 'folders'];
 
 let dbPromise = null;
 
