@@ -46,13 +46,13 @@ async function migrateToPoses(character) {
 
 export async function render(root, params) {
   let editingCharacterId = params.id || null;
-  let editingObjectId = null;
+  let editingSimpleItem = null; // { store: 'objects' | 'stickers', id }
 
   async function renderList() {
-    const [characters, objects] = await Promise.all([getAll('characters'), getAll('objects')]);
+    const [characters, objects, stickers] = await Promise.all([getAll('characters'), getAll('objects'), getAll('stickers')]);
     root.innerHTML = `
       <h1>Characters &amp; Objects</h1>
-      <p class="lead">Characters are puppeteered live (body + mouth + eyes layers). Objects are simple props you can place in a scene.</p>
+      <p class="lead">Characters are puppeteered live (body + mouth + eyes layers). Objects are simple props you can place in a scene. Stickers are like objects, but start out hidden — in Animate, you puppeteer when and where one appears.</p>
 
       <div class="panel">
         <div class="row between">
@@ -68,6 +68,14 @@ export async function render(root, params) {
           <button class="btn accent" id="new-object">+ New object</button>
         </div>
         <div class="grid cols-auto" id="object-grid" style="margin-top:12px;"></div>
+      </div>
+
+      <div class="panel">
+        <div class="row between">
+          <h2 style="margin:0">Stickers</h2>
+          <button class="btn accent" id="new-sticker">+ New sticker</button>
+        </div>
+        <div class="grid cols-auto" id="sticker-grid" style="margin-top:12px;"></div>
       </div>
     `;
 
@@ -125,7 +133,7 @@ export async function render(root, params) {
           <button class="btn danger small icon-only" data-del>✕</button>
         </div>`;
       card.addEventListener('click', () => {
-        editingObjectId = obj.id;
+        editingSimpleItem = { store: 'objects', id: obj.id };
         renderEditor();
       });
       card.querySelector('[data-del]').addEventListener('click', async (e) => {
@@ -136,6 +144,33 @@ export async function render(root, params) {
         }
       });
       objGrid.appendChild(card);
+    }
+
+    const stickerGrid = root.querySelector('#sticker-grid');
+    if (stickers.length === 0) {
+      stickerGrid.innerHTML = '<div class="empty-state">No stickers yet.</div>';
+    }
+    for (const sticker of stickers) {
+      const url = sticker.assetId ? await getAssetUrl(sticker.assetId) : null;
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.innerHTML = `
+        <div class="thumb">${url ? `<img src="${url}" />` : '<span style="font-size:2rem">⭐</span>'}</div>
+        <div class="label"><span>${escapeHtml(sticker.name)}</span>
+          <button class="btn danger small icon-only" data-del>✕</button>
+        </div>`;
+      card.addEventListener('click', () => {
+        editingSimpleItem = { store: 'stickers', id: sticker.id };
+        renderEditor();
+      });
+      card.querySelector('[data-del]').addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (confirm(`Delete sticker "${sticker.name}"?`)) {
+          await deleteRecord('stickers', sticker.id);
+          renderList();
+        }
+      });
+      stickerGrid.appendChild(card);
     }
 
     root.querySelector('#new-character').addEventListener('click', async () => {
@@ -153,10 +188,18 @@ export async function render(root, params) {
       await putRecord('objects', obj);
       renderList();
     });
+    root.querySelector('#new-sticker').addEventListener('click', async () => {
+      const name = prompt('Sticker name', 'New Sticker') || 'New Sticker';
+      const asset = await pickAsset();
+      if (!asset) return;
+      const sticker = { id: uid('sticker'), name, assetId: asset.id, createdAt: Date.now() };
+      await putRecord('stickers', sticker);
+      renderList();
+    });
   }
 
   async function renderEditor() {
-    if (editingObjectId) return renderObjectEditor();
+    if (editingSimpleItem) return renderSimpleItemEditor();
     let character = await getRecord('characters', editingCharacterId);
     if (!character) {
       editingCharacterId = null;
@@ -389,18 +432,21 @@ export async function render(root, params) {
     }
   }
 
-  async function renderObjectEditor() {
-    const objects = await getAll('objects');
-    const obj = objects.find((o) => o.id === editingObjectId);
-    if (!obj) {
-      editingObjectId = null;
+  // Shared editor for both 'objects' and 'stickers' — a simple
+  // name + single image, no layers/poses.
+  async function renderSimpleItemEditor() {
+    const { store, id } = editingSimpleItem;
+    const items = await getAll(store);
+    const item = items.find((o) => o.id === id);
+    if (!item) {
+      editingSimpleItem = null;
       return renderList();
     }
-    const url = await getAssetUrl(obj.assetId);
+    const url = await getAssetUrl(item.assetId);
     root.innerHTML = `
       <div class="row between">
         <h1 style="margin:0">
-          <input id="obj-name" type="text" value="${escapeHtml(obj.name)}" style="font-size:1.4rem; font-weight:800; border:none; border-bottom: 2px dashed var(--border); background:transparent;" />
+          <input id="item-name" type="text" value="${escapeHtml(item.name)}" style="font-size:1.4rem; font-weight:800; border:none; border-bottom: 2px dashed var(--border); background:transparent;" />
         </h1>
         <button class="btn secondary" id="back-btn">← Back to library</button>
       </div>
@@ -412,19 +458,19 @@ export async function render(root, params) {
       </div>
     `;
     root.querySelector('#back-btn').addEventListener('click', () => {
-      editingObjectId = null;
+      editingSimpleItem = null;
       renderList();
     });
-    root.querySelector('#obj-name').addEventListener('change', async (e) => {
-      obj.name = e.target.value || 'Untitled';
-      await putRecord('objects', obj);
+    root.querySelector('#item-name').addEventListener('change', async (e) => {
+      item.name = e.target.value || 'Untitled';
+      await putRecord(store, item);
     });
     root.querySelector('#change-img').addEventListener('click', async () => {
       const asset = await pickAsset();
       if (!asset) return;
-      obj.assetId = asset.id;
-      await putRecord('objects', obj);
-      renderObjectEditor();
+      item.assetId = asset.id;
+      await putRecord(store, item);
+      renderSimpleItemEditor();
     });
   }
 

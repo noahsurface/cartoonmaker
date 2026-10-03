@@ -26,9 +26,10 @@ export async function render(root, params) {
     root.innerHTML = `<div class="panel"><h2>Scene not found</h2><a href="#/scenes">Back to scenes</a></div>`;
     return;
   }
-  const [characters, objects] = await Promise.all([getAll('characters'), getAll('objects')]);
+  const [characters, objects, stickers] = await Promise.all([getAll('characters'), getAll('objects'), getAll('stickers')]);
   const characterById = new Map(characters.map((c) => [c.id, c]));
   const objectById = new Map(objects.map((o) => [o.id, o]));
+  const stickerById = new Map(stickers.map((s) => [s.id, s]));
   const duration = sceneDuration(scene);
 
   let rafHandle = null;
@@ -48,7 +49,7 @@ export async function render(root, params) {
       !window.MediaRecorder
         ? '<div class="notice error">This browser does not support recording video (MediaRecorder API). Try a recent Chrome, Edge, or Firefox.</div>'
         : duration <= 0
-        ? `<div class="notice error">No character performances have been recorded in this scene yet. <a href="#/puppet?id=${scene.id}">Go animate at least one character</a> first.</div>`
+        ? `<div class="notice error">Nothing has been recorded in this scene yet. <a href="#/puppet?id=${scene.id}">Go animate at least one character or sticker</a> first.</div>`
         : ''
     }
     <div class="editor-layout" style="grid-template-columns: 1fr 260px;">
@@ -93,7 +94,7 @@ export async function render(root, params) {
   const progressLabel = root.querySelector('#progress-label');
   const downloadArea = root.querySelector('#download-area');
 
-  let runtime = new SceneRuntime(scene, characterById, objectById);
+  let runtime = new SceneRuntime(scene, characterById, objectById, stickerById);
   await runtime.preload();
   runtime.render(ctx, 0, (entityId) => {
     const track = scene.tracks[entityId];
@@ -125,7 +126,7 @@ export async function render(root, params) {
     const fps = parseInt(fpsSelect.value, 10);
     canvas.width = w;
     canvas.height = h;
-    runtime = new SceneRuntime(scene, characterById, objectById);
+    runtime = new SceneRuntime(scene, characterById, objectById, stickerById);
     await runtime.preload();
 
     const videoStream = canvas.captureStream(fps);

@@ -1,14 +1,21 @@
-// Records a character's live performance as a timestamped position + pose
-// track, and resolves what that track (or any other already-recorded track)
-// should look like at an arbitrary playback time. Positions are absolute
-// pixels in the shared 2560x1440 reference space (see engine/coords.js).
+// Records a character's (or sticker's) live performance as a timestamped
+// position + extra-state track, and resolves what that track (or any other
+// already-recorded track) should look like at an arbitrary playback time.
+// Positions are absolute pixels in the shared 2560x1440 reference space
+// (see engine/coords.js).
 import { clampToBounds, REF_WIDTH, REF_HEIGHT } from './coords.js';
 
 const MAX_SPEED = 500; // px/sec
 const ACCEL = 2000; // px/sec^2, used for both speeding up and slowing down
 
 export class TrackRecorder {
-  constructor(startX, startY, worldWidth = REF_WIDTH, worldHeight = REF_HEIGHT, obstacles = []) {
+  /**
+   * @param {boolean} groundedY false allows the full vertical extent of the
+   *   world instead of just the walkable ground band — see clampToBounds in
+   *   engine/coords.js. Characters are grounded; stickers (floating
+   *   overlays) are not.
+   */
+  constructor(startX, startY, worldWidth = REF_WIDTH, worldHeight = REF_HEIGHT, obstacles = [], groundedY = true) {
     this.samples = [];
     this.startedAt = null;
     this.x = startX;
@@ -17,6 +24,7 @@ export class TrackRecorder {
     this.vy = 0;
     this.worldWidth = worldWidth;
     this.worldHeight = worldHeight;
+    this.groundedY = groundedY;
     // Static ground-footprint rectangles (reference-space) for solid
     // objects, computed once at record-start since objects don't move — see
     // SceneRuntime.getSolidObstacles().
@@ -28,8 +36,15 @@ export class TrackRecorder {
     this.startedAt = performance.now();
   }
 
-  /** Advance position from an input direction (-1..1 each axis) and record a sample. Returns the new {x,y}. */
-  step(dx, dy, dt, mouthHeld, poseId = null) {
+  /**
+   * Advance position from an input direction (-1..1 each axis) and record a
+   * sample. Returns the new {x,y}.
+   * @param {object} extra extra per-sample fields merged in as-is (e.g.
+   *   `{mouthHeld, poseId}` for a character, `{visible}` for a sticker) —
+   *   TrackRecorder itself doesn't care what they mean, only the renderer
+   *   that later reads them back out via sampleTrackAt() does.
+   */
+  step(dx, dy, dt, extra = {}) {
     // Normalize so diagonal input doesn't move faster than a single axis.
     const mag = Math.hypot(dx, dy);
     const dirX = mag > 1 ? dx / mag : dx;
@@ -40,7 +55,7 @@ export class TrackRecorder {
     this.vx = moveToward(this.vx, targetVx, ACCEL * dt);
     this.vy = moveToward(this.vy, targetVy, ACCEL * dt);
 
-    let next = clampToBounds(this.x + this.vx * dt, this.y + this.vy * dt, this.worldWidth, this.worldHeight);
+    let next = clampToBounds(this.x + this.vx * dt, this.y + this.vy * dt, this.worldWidth, this.worldHeight, this.groundedY);
     // If we hit a bound, stop the velocity on that axis instead of pinning
     // against it at full speed (which would cause a jarring re-launch).
     if (next.x !== this.x + this.vx * dt) this.vx = 0;
@@ -62,7 +77,7 @@ export class TrackRecorder {
     this.y = next.y;
 
     const t = (performance.now() - this.startedAt) / 1000;
-    this.samples.push({ t, x: this.x, y: this.y, mouthHeld, poseId });
+    this.samples.push({ t, x: this.x, y: this.y, ...extra });
     return { x: this.x, y: this.y };
   }
 
@@ -93,14 +108,21 @@ function pushOutOfRect(x, y, rect) {
   return { x: distances[0].x, y: distances[0].y };
 }
 
-/** Sample an already-recorded track at time t (seconds), interpolating position. */
+/** Sample an already-recorded track at time t (seconds), interpolating position.
+ * Every non-x/y field (mouthHeld, poseId, visible, ...) is a discrete step
+ * function — whatever extra fields a given entity's samples happen to carry
+ * are passed through as-is from the bracketing sample, not interpolated, so
+ * this works uniformly for characters and stickers without needing to know
+ * which fields either one actually uses. */
 export function sampleTrackAt(track, t) {
   const samples = track?.samples;
   if (!samples || samples.length === 0) return null;
   const first = samples[0];
-  if (t <= first.t) return { x: first.x, y: first.y, mouthHeld: first.mouthHeld, poseId: first.poseId };
+  if (t <= first.t) return { ...first };
   const last = samples[samples.length - 1];
-  if (t >= last.t) return { x: last.x, y: last.y, mouthHeld: false, poseId: last.poseId };
+  // mouthHeld specifically is forced off at/after the track's end, so a
+  // character doesn't appear to keep talking forever past their last sample.
+  if (t >= last.t) return { ...last, mouthHeld: false };
 
   let lo = 0;
   let hi = samples.length - 1;
@@ -114,12 +136,9 @@ export function sampleTrackAt(track, t) {
   const span = b.t - a.t || 1;
   const frac = (t - a.t) / span;
   return {
+    ...a,
     x: a.x + (b.x - a.x) * frac,
     y: a.y + (b.y - a.y) * frac,
-    // Discrete/step fields (not interpolated) hold the earlier sample's
-    // value until it actually changes, same as mouthHeld always has.
-    mouthHeld: a.mouthHeld,
-    poseId: a.poseId,
   };
 }
 
