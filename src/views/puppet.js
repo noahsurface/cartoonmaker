@@ -37,6 +37,11 @@ export async function render(root, params) {
   let mode = 'idle'; // 'idle' | 'recording' | 'previewing'
   let sceneTime = 0;
   let recorder = null;
+  // The scene-time a take started recording from — 0 for a normal take, or
+  // the scrubbed-to point for a punch-in re-take of an already-recorded
+  // entity (see recordBtn below). Needed again at Stop to splice the new
+  // take onto the portion of the old track before this point.
+  let punchInTime = 0;
   // The armed entity's pose sequence and where we currently are in it —
   // stepped by LB/RB (or [ / ]) only while actually recording, mirroring how
   // movement/talk are also only live during a take. Only meaningful for
@@ -102,6 +107,7 @@ export async function render(root, params) {
         <div class="dpad-help" id="dpad-help"></div>
         <h2>Who's up?</h2>
         <select id="armed-select"></select>
+        <div id="punch-in-hint" style="margin-top:6px;font-size:0.78rem;color:var(--ink-soft);"></div>
         <div class="row" style="margin-top:6px;">
           <button class="btn danger" id="record-btn">● Record</button>
           <button class="btn secondary" id="stop-record-btn" disabled>■ Stop</button>
@@ -134,6 +140,22 @@ export async function render(root, params) {
   const audioLabel = root.querySelector('#audio-label');
 
   const dpadHelpEl = root.querySelector('#dpad-help');
+  const punchInHintEl = root.querySelector('#punch-in-hint');
+
+  // A "punch-in": if the armed entity already has a track and the timeline
+  // is scrubbed to a point other than the very start, Record re-takes from
+  // there instead of from scratch — everything on that track from this point
+  // onward gets replaced, and everything before it is kept untouched. An
+  // entity with no track yet always records a fresh take from 0 regardless
+  // of where the timeline happens to be scrubbed, since there's nothing yet
+  // to punch into.
+  function refreshPunchInHint() {
+    const track = scene.tracks[armedEntityId];
+    punchInHintEl.textContent =
+      mode === 'idle' && track && sceneTime > 0.05
+        ? `Punching in at ${sceneTime.toFixed(1)}s — Record will replace this track from here on, keeping everything before it.`
+        : '';
+  }
 
   function refreshDpadHelp() {
     const entity = recordableEntities.find((e) => e.id === armedEntityId);
@@ -259,9 +281,11 @@ export async function render(root, params) {
     armedEntityId = armedSelect.value;
     refreshPoseSequenceForArmed();
     refreshDpadHelp();
+    refreshPunchInHint();
   });
   refreshPoseSequenceForArmed();
   refreshDpadHelp();
+  refreshPunchInHint();
 
   async function rebuildRuntime() {
     runtime = new SceneRuntime(scene, characterById, objectById, stickerById);
@@ -361,15 +385,24 @@ export async function render(root, params) {
 
   recordBtn.addEventListener('click', async () => {
     if (mode !== 'idle') return;
+    // Captured now, before the countdown — a punch-in only when the armed
+    // entity already has a track to splice onto; otherwise always a fresh
+    // take from 0, regardless of where the timeline happens to be scrubbed.
+    const existingTrack = scene.tracks[armedEntityId];
+    punchInTime = existingTrack ? sceneTime : 0;
     mode = 'countdown';
     countdownCancelled = false;
     armedSelect.disabled = true;
     recordBtn.disabled = true;
     stopBtn.disabled = false;
     recordStatus.innerHTML = '';
+    punchInHintEl.textContent = '';
     countdownOverlay.style.display = 'flex';
     // Gives the user a moment between clicking Record and readying their
     // keyboard/gamepad — cancelable via Stop, same as an in-progress recording.
+    // The stage itself is left untouched throughout (no redraw happens here),
+    // so for a punch-in it keeps showing exactly the scrubbed-to frame the
+    // whole time, giving a clear look at what's about to be taken over.
     for (let n = 3; n >= 1; n--) {
       countdownOverlay.textContent = String(n);
       await sleep(1000);
@@ -379,30 +412,47 @@ export async function render(root, params) {
         armedSelect.disabled = false;
         recordBtn.disabled = false;
         stopBtn.disabled = true;
+        refreshPunchInHint();
         return;
       }
     }
     countdownOverlay.style.display = 'none';
 
     mode = 'recording';
-    sceneTime = 0;
+    sceneTime = punchInTime;
     refreshPoseSequenceForArmed();
     const entity = recordableEntities.find((e) => e.id === armedEntityId);
     const isSticker = entity.kind === 'sticker';
-    stickerVisible = false;
+    // Punching in snaps the live take to exactly where the old track already
+    // was at this instant (position, and pose/visibility) so there's no
+    // visible jump the moment recording actually starts.
+    const seedSample = punchInTime > 0 && existingTrack ? sampleTrackAt(existingTrack, punchInTime) : null;
+    const startX = seedSample ? seedSample.x : entity.x;
+    const startY = seedSample ? seedSample.y : entity.y;
+    stickerVisible = isSticker && seedSample?.visible === true;
     prevMouthHeld = false;
+    if (!isSticker && seedSample?.poseId) {
+      const seededIndex = poseSequence.indexOf(seedSample.poseId);
+      if (seededIndex >= 0) {
+        currentPoseIndex = seededIndex;
+        updatePoseStatus();
+      }
+    }
     recorder = new TrackRecorder(
-      entity.x,
-      entity.y,
+      startX,
+      startY,
       runtime.worldWidth,
       runtime.worldHeight,
       isSticker ? [] : runtime.getSolidObstacles(),
-      !isSticker
+      !isSticker,
+      punchInTime
     );
     recorder.start();
-    recordStatus.innerHTML = `<div class="status-line"><span class="dot-indicator rec"></span> Recording ${escapeHtml(entity.name)}…</div>`;
+    recordStatus.innerHTML = `<div class="status-line"><span class="dot-indicator rec"></span> ${
+      punchInTime > 0 ? `Punching in on ${escapeHtml(entity.name)} from ${punchInTime.toFixed(1)}s…` : `Recording ${escapeHtml(entity.name)}…`
+    }</div>`;
     stopLoop();
-    syncAudioToTime(0, true);
+    syncAudioToTime(punchInTime, true);
     rafHandle = requestAnimationFrame(loop);
   });
 
@@ -414,7 +464,15 @@ export async function render(root, params) {
     if (mode !== 'recording') return;
     stopLoop();
     dialogueAudioEl.pause();
-    const track = recorder.finish();
+    const newTake = recorder.finish();
+    // A punch-in splice: keep whatever the old track had strictly before the
+    // punch-in point, then replace everything from there on with the new
+    // take (whose samples already carry absolute scene-time `t` stamps
+    // starting at punchInTime — see TrackRecorder's startTimeOffset). For a
+    // normal from-scratch take, punchInTime is 0 and this is just newTake.
+    const oldSamples = punchInTime > 0 ? scene.tracks[armedEntityId]?.samples ?? [] : [];
+    const samples = [...oldSamples.filter((s) => s.t < punchInTime), ...newTake.samples];
+    const track = { samples, duration: samples.length ? samples[samples.length - 1].t : 0 };
     scene.tracks[armedEntityId] = track;
     scene.updatedAt = Date.now();
     await putRecord('scenes', scene);
@@ -423,15 +481,20 @@ export async function render(root, params) {
     recordBtn.disabled = false;
     stopBtn.disabled = true;
     const recordedName = recordableEntities.find((e) => e.id === armedEntityId)?.name || 'entity';
-    recordStatus.innerHTML = `<div class="notice success">Saved ${track.duration.toFixed(1)}s for ${escapeHtml(recordedName)}.</div>`;
+    recordStatus.innerHTML =
+      punchInTime > 0
+        ? `<div class="notice success">Punched in from ${punchInTime.toFixed(1)}s — ${escapeHtml(recordedName)}'s track is now ${track.duration.toFixed(1)}s.</div>`
+        : `<div class="notice success">Saved ${track.duration.toFixed(1)}s for ${escapeHtml(recordedName)}.</div>`;
     const next = recordableEntities.find((e) => !scene.tracks[e.id]);
     if (next) armedEntityId = next.id;
+    punchInTime = 0;
     refreshArmedSelect();
     refreshTrackList();
     refreshPoseSequenceForArmed();
     refreshDpadHelp();
     sceneTime = 0;
     drawStatic(0);
+    refreshPunchInHint();
   });
 
   root.querySelector('#play-btn').addEventListener('click', () => {
@@ -466,6 +529,7 @@ export async function render(root, params) {
     sceneTime = frac * maxDuration;
     syncAudioToTime(sceneTime, false);
     drawStatic(sceneTime);
+    refreshPunchInHint();
   });
 
   function updateGamepadStatus() {

@@ -14,10 +14,17 @@ export class TrackRecorder {
    *   world instead of just the walkable ground band — see clampToBounds in
    *   engine/coords.js. Characters are grounded; stickers (floating
    *   overlays) are not.
+   * @param {number} startTimeOffset absolute scene-time (seconds) this
+   *   recording begins at — 0 for a normal from-scratch take. A punch-in
+   *   (puppet.js) passes the scrubbed-to time instead, so every sample this
+   *   recorder pushes carries an absolute `t` that splices seamlessly onto
+   *   the portion of an existing track before that point, rather than a
+   *   track-local `t` that would always restart at 0.
    */
-  constructor(startX, startY, worldWidth = REF_WIDTH, worldHeight = REF_HEIGHT, obstacles = [], groundedY = true) {
+  constructor(startX, startY, worldWidth = REF_WIDTH, worldHeight = REF_HEIGHT, obstacles = [], groundedY = true, startTimeOffset = 0) {
     this.samples = [];
     this.startedAt = null;
+    this.startTimeOffset = startTimeOffset;
     this.x = startX;
     this.y = startY;
     this.vx = 0;
@@ -76,7 +83,7 @@ export class TrackRecorder {
     this.x = next.x;
     this.y = next.y;
 
-    const t = (performance.now() - this.startedAt) / 1000;
+    const t = this.startTimeOffset + (performance.now() - this.startedAt) / 1000;
     this.samples.push({ t, x: this.x, y: this.y, ...extra });
     return { x: this.x, y: this.y };
   }
