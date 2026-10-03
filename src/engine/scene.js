@@ -21,6 +21,62 @@ import { FX_ASSET_IDS } from '../seed.js';
 export const STAGE_WIDTH = 1280;
 export const STAGE_HEIGHT = 720;
 
+// Opacity a hidden sticker is drawn at in the Animate view (puppet.js passes
+// opts.ghostHidden) so the user can still see where it currently sits while
+// it's toggled off, instead of it vanishing completely. The scene editor
+// (fullWorld) and export/final render ignore this — a sticker is either
+// always shown (editor, for placement) or genuinely absent (export, the
+// final output) rather than faintly visible.
+const STICKER_GHOST_OPACITY = 0.1;
+
+// A sticker's optional continuous motion, active only while it's toggled
+// visible — reusing the same sway/bounce "feel" (angle amplitude, cycle
+// length) as a walking character, just driven by a plain elapsed-time clock
+// instead of actual movement, and in absolute pixels for bounce rather than
+// a fraction of height (stickers have no standard body height to be a
+// fraction of). See StickerAnimState below.
+const STICKER_SWAY_DEGREES = 7;
+const STICKER_SWAY_CYCLE_SECONDS = 0.75;
+const STICKER_BOUNCE_AMPLITUDE_PX = 50;
+const STICKER_BOUNCE_CYCLE_SECONDS = 0.75;
+const STICKER_SPIN_CYCLE_SECONDS = 2;
+
+/**
+ * Tracks one sticker's elapsed-visible clock, the only state its bounce/sway/
+ * spin motion needs. The clock resets to 0 every time the sticker transitions
+ * from hidden to visible (so motion always starts from its neutral pose at
+ * the moment of appearing) and snaps back to 0 while hidden (so toggling it
+ * off instantly returns its angle/offset to neutral, per spec, rather than
+ * leaving it mid-motion).
+ */
+class StickerAnimState {
+  constructor() {
+    this.visibleClock = 0;
+    this.wasVisible = false;
+  }
+
+  update(visible, dt) {
+    if (visible) {
+      this.visibleClock = this.wasVisible ? this.visibleClock + dt : 0;
+    } else {
+      this.visibleClock = 0;
+    }
+    this.wasVisible = visible;
+  }
+}
+
+function stickerSwayAngle(clock) {
+  return (Math.sin((clock * 2 * Math.PI) / STICKER_SWAY_CYCLE_SECONDS) * STICKER_SWAY_DEGREES * Math.PI) / 180;
+}
+
+function stickerBounceOffsetPx(clock) {
+  return Math.sin((clock * 2 * Math.PI) / STICKER_BOUNCE_CYCLE_SECONDS) * STICKER_BOUNCE_AMPLITUDE_PX;
+}
+
+function stickerSpinAngle(clock) {
+  return (clock / STICKER_SPIN_CYCLE_SECONDS) * 2 * Math.PI;
+}
+
 export class SceneRuntime {
   /**
    * @param {object} scene
@@ -34,6 +90,7 @@ export class SceneRuntime {
     this.objectById = objectById;
     this.stickerById = stickerById;
     this.animStates = new Map();
+    this.stickerAnimStates = new Map();
     this.fx = { shadowImg: null, bubbleFrames: [] };
     this.shadowWidthFractionByCharacterId = new Map();
     this.shadowWidthFractionByObjectId = new Map();
@@ -44,6 +101,8 @@ export class SceneRuntime {
     for (const entity of scene.entities) {
       if (entity.kind === 'character') {
         this.animStates.set(entity.id, new CharacterAnimState(entity.x, entity.y));
+      } else if (entity.kind === 'sticker') {
+        this.stickerAnimStates.set(entity.id, new StickerAnimState());
       }
     }
   }
@@ -142,9 +201,12 @@ export class SceneRuntime {
    *   Returns the current live/playback pose sample for a character entity (position in the
    *   2560x1440 reference space), or null to leave it at rest at its placed position.
    * @param {string|null} highlightEntityId optional entity to draw a selection ring around
-   * @param {{fullWorld?:boolean}} opts fullWorld shows the entire (possibly larger-than-frame)
-   *   world zoomed out to fit the canvas, ignoring camera follow — used by the scene editor so
-   *   everything can be placed at a glance. Omit/false for the normal windowed camera view.
+   * @param {{fullWorld?:boolean, ghostHidden?:boolean}} opts fullWorld shows the entire
+   *   (possibly larger-than-frame) world zoomed out to fit the canvas, ignoring camera follow —
+   *   used by the scene editor so everything can be placed at a glance. Omit/false for the
+   *   normal windowed camera view. ghostHidden draws a hidden sticker at reduced opacity
+   *   instead of skipping it entirely — used by the Animate view so the user can still see
+   *   where it currently is while it's toggled off.
    */
   render(ctx, dt, resolvePose, highlightEntityId = null, opts = {}) {
     const w = ctx.canvas.width;
@@ -265,10 +327,16 @@ export class SceneRuntime {
         // Unlike a character, a sticker with no recorded track yet defaults
         // to *invisible* rather than shown at its placed position — it's
         // meant to pop into the scene at a chosen moment, not be on screen
-        // from the start. fullWorld (the scene editor) always shows it
-        // regardless, since that's where its starting position gets placed.
-        const visible = !!opts.fullWorld || sample?.visible === true;
-        if (!visible) continue;
+        // from the start. fullWorld (the scene editor) always shows it at
+        // full opacity regardless, since that's where its starting position
+        // gets placed; ghostHidden (the Animate view) shows it faintly
+        // instead of skipping it, so the user can see where it currently
+        // sits while deciding when to toggle it on; everywhere else
+        // (export/final render) a hidden sticker is skipped entirely, same
+        // as before this opacity behavior existed.
+        const visibleNow = sample?.visible === true;
+        const alpha = opts.fullWorld ? 1 : visibleNow ? 1 : opts.ghostHidden ? STICKER_GHOST_OPACITY : 0;
+        if (alpha <= 0) continue;
         const sticker = this.stickerById.get(entity.refId);
         if (!sticker) continue;
         const img = getCachedImage(sticker.assetId);
@@ -279,7 +347,32 @@ export class SceneRuntime {
         const dh = size;
         const ox = offsetX + (x - camX) * scale;
         const oy = offsetY + (y - camY) * scale;
-        ctx.drawImage(img, ox - dw / 2, oy - dh, dw, dh);
+
+        // Optional continuous motion (bounce/sway/spin), active only while
+        // actually visible — see StickerAnimState. Only one of bounceOffsetPx
+        // / angle is ever non-zero, since a sticker has exactly one movement
+        // mode at a time.
+        const state = this.stickerAnimStates.get(entity.id);
+        state.update(visibleNow, dt);
+        let angle = 0;
+        let bounceOffsetPx = 0;
+        if (visibleNow) {
+          if (entity.movement === 'bounce') bounceOffsetPx = stickerBounceOffsetPx(state.visibleClock);
+          else if (entity.movement === 'sway') angle = stickerSwayAngle(state.visibleClock);
+          else if (entity.movement === 'spin') angle = stickerSpinAngle(state.visibleClock);
+        }
+
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        // bounceOffsetPx is in reference-space pixels (like every other
+        // distance in this app's data model — see engine/coords.js), so it's
+        // scaled down by the same factor as everything else here, keeping
+        // the bounce's apparent size consistent across the windowed stage,
+        // a full-world zoomed-out view, and export at a different resolution.
+        ctx.translate(ox, oy - bounceOffsetPx * scale);
+        ctx.rotate(angle);
+        ctx.drawImage(img, -dw / 2, -dh, dw, dh);
+        ctx.restore();
         if (entity.id === highlightEntityId) {
           ctx.save();
           ctx.strokeStyle = '#2fa8ff';

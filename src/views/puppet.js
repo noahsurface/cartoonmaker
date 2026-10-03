@@ -273,7 +273,7 @@ export async function render(root, params) {
     runtime.render(ctx, 0, (entityId) => {
       const track = scene.tracks[entityId];
       return track ? sampleTrackAt(track, t) : null;
-    }, mode === 'idle' ? armedEntityId : null);
+    }, mode === 'idle' ? armedEntityId : null, { ghostHidden: true });
     updatePlayhead(t);
   }
 
@@ -329,7 +329,7 @@ export async function render(root, params) {
         if (entityId === armedEntityId) return { x, y, ...overlay };
         const track = scene.tracks[entityId];
         return track ? sampleTrackAt(track, sceneTime) : null;
-      }, armedEntityId);
+      }, armedEntityId, { ghostHidden: true });
       const liveMax = Math.max(sceneDuration(scene), sceneTime, 0.001);
       timelinePlayhead.style.left = `${Math.min(100, (sceneTime / liveMax) * 100)}%`;
       rafHandle = requestAnimationFrame(loop);
@@ -341,7 +341,7 @@ export async function render(root, params) {
         runtime.render(ctx, dt, (entityId) => {
           const track = scene.tracks[entityId];
           return track ? sampleTrackAt(track, sceneTime) : null;
-        });
+        }, null, { ghostHidden: true });
         updatePlayhead(sceneTime);
         dialogueAudioEl.pause();
         mode = 'idle';
@@ -350,7 +350,7 @@ export async function render(root, params) {
       runtime.render(ctx, dt, (entityId) => {
         const track = scene.tracks[entityId];
         return track ? sampleTrackAt(track, sceneTime) : null;
-      });
+      }, null, { ghostHidden: true });
       updatePlayhead(sceneTime);
       rafHandle = requestAnimationFrame(loop);
     }

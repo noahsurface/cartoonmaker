@@ -158,6 +158,7 @@ export async function render(root, params) {
       y: 1080,
       scale: 0.2,
       baseScale: 0.2,
+      movement: 'static',
       z: nextZ(),
     };
     scene.entities.push(entity);
@@ -222,6 +223,18 @@ export async function render(root, params) {
                <label class="row" style="gap:6px;"><input type="checkbox" id="ent-solid" ${entity.solid ? 'checked' : ''} /> Solid (blocks characters)</label>`
             : ''
         }
+        ${
+          entity.kind === 'sticker'
+            ? `<label>Movement <span style="font-weight:400;color:var(--ink-soft);">(plays while toggled visible in Animate)</span>
+                 <select id="ent-sticker-movement">
+                   <option value="static" ${(entity.movement || 'static') === 'static' ? 'selected' : ''}>Static</option>
+                   <option value="bounce" ${entity.movement === 'bounce' ? 'selected' : ''}>Bounce</option>
+                   <option value="sway" ${entity.movement === 'sway' ? 'selected' : ''}>Sway</option>
+                   <option value="spin" ${entity.movement === 'spin' ? 'selected' : ''}>Spin</option>
+                 </select>
+               </label>`
+            : ''
+        }
         ${entity.kind === 'character' ? '<div id="pose-sequence-editor"></div>' : ''}
         <div class="row">
           <button class="btn small" id="ent-back">Send back</button>
@@ -244,6 +257,11 @@ export async function render(root, params) {
     });
     el.querySelector('#ent-solid')?.addEventListener('change', async (e) => {
       entity.solid = e.target.checked;
+      await save();
+      drawFrame();
+    });
+    el.querySelector('#ent-sticker-movement')?.addEventListener('change', async (e) => {
+      entity.movement = e.target.value;
       await save();
       drawFrame();
     });
