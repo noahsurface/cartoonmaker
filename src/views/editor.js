@@ -138,6 +138,7 @@ export async function render(root, params) {
       baseScale: 0.18,
       hasShadow: false,
       solid: false,
+      movable: false,
       z: nextZ(),
     };
     scene.entities.push(entity);
@@ -220,7 +221,13 @@ export async function render(root, params) {
         ${
           entity.kind === 'object'
             ? `<label class="row" style="gap:6px;"><input type="checkbox" id="ent-shadow" ${entity.hasShadow ? 'checked' : ''} /> Shadow</label>
-               <label class="row" style="gap:6px;"><input type="checkbox" id="ent-solid" ${entity.solid ? 'checked' : ''} /> Solid (blocks characters)</label>`
+               <label class="row" style="gap:6px;"><input type="checkbox" id="ent-solid" ${entity.solid ? 'checked' : ''} /> Solid (blocks characters)</label>
+               <label>Movement <span style="font-weight:400;color:var(--ink-soft);">(a Moving Object can be puppeteered/recorded in Animate, alongside characters and stickers)</span>
+                 <select id="ent-object-movable">
+                   <option value="false" ${!entity.movable ? 'selected' : ''}>Still Object</option>
+                   <option value="true" ${entity.movable ? 'selected' : ''}>Moving Object</option>
+                 </select>
+               </label>`
             : ''
         }
         ${
@@ -257,6 +264,11 @@ export async function render(root, params) {
     });
     el.querySelector('#ent-solid')?.addEventListener('change', async (e) => {
       entity.solid = e.target.checked;
+      await save();
+      drawFrame();
+    });
+    el.querySelector('#ent-object-movable')?.addEventListener('change', async (e) => {
+      entity.movable = e.target.value === 'true';
       await save();
       drawFrame();
     });
