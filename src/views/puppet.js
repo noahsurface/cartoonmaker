@@ -380,8 +380,46 @@ export async function render(root, params) {
     }
   }
 
-  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   let countdownCancelled = false;
+  const COUNTDOWN_SECONDS = 3;
+
+  // Drives the 3-2-1 overlay for exactly COUNTDOWN_SECONDS, and — for a
+  // punch-in — simultaneously plays back everyone's existing tracks (the
+  // armed entity's own prior take included) for the COUNTDOWN_SECONDS of
+  // scene-time immediately before the punch-in point, in real time, so the
+  // countdown doubles as a pre-roll: the user gets a feel for what's
+  // happening in the scene right up to the moment they're about to take
+  // over, instead of staring at a frozen frame. A plain (non-punch-in) take
+  // has nothing to pre-roll, so the stage is simply left as it already was.
+  // Resolves to whether the countdown was cancelled via Stop.
+  function runCountdown() {
+    const hasPreRoll = punchInTime > 0;
+    const preRollStart = hasPreRoll ? Math.max(0, punchInTime - COUNTDOWN_SECONDS) : 0;
+    return new Promise((resolve) => {
+      let startTs = null;
+      let lastTs = null;
+      function frame(ts) {
+        if (startTs == null) startTs = ts;
+        const dt = Math.min(0.1, (ts - (lastTs ?? ts)) / 1000);
+        lastTs = ts;
+        const elapsedSec = (ts - startTs) / 1000;
+        countdownOverlay.textContent = String(Math.max(1, COUNTDOWN_SECONDS - Math.floor(elapsedSec)));
+        if (hasPreRoll) {
+          const t = Math.min(punchInTime, preRollStart + elapsedSec);
+          runtime.render(ctx, dt, (entityId) => {
+            const track = scene.tracks[entityId];
+            return track ? sampleTrackAt(track, t) : null;
+          }, null, { ghostHidden: true });
+        }
+        if (countdownCancelled || elapsedSec >= COUNTDOWN_SECONDS) {
+          resolve(countdownCancelled);
+          return;
+        }
+        requestAnimationFrame(frame);
+      }
+      requestAnimationFrame(frame);
+    });
+  }
 
   recordBtn.addEventListener('click', async () => {
     if (mode !== 'idle') return;
@@ -398,25 +436,19 @@ export async function render(root, params) {
     recordStatus.innerHTML = '';
     punchInHintEl.textContent = '';
     countdownOverlay.style.display = 'flex';
-    // Gives the user a moment between clicking Record and readying their
-    // keyboard/gamepad — cancelable via Stop, same as an in-progress recording.
-    // The stage itself is left untouched throughout (no redraw happens here),
-    // so for a punch-in it keeps showing exactly the scrubbed-to frame the
-    // whole time, giving a clear look at what's about to be taken over.
-    for (let n = 3; n >= 1; n--) {
-      countdownOverlay.textContent = String(n);
-      await sleep(1000);
-      if (countdownCancelled) {
-        countdownOverlay.style.display = 'none';
-        mode = 'idle';
-        armedSelect.disabled = false;
-        recordBtn.disabled = false;
-        stopBtn.disabled = true;
-        refreshPunchInHint();
-        return;
-      }
-    }
+    // Cancelable via the same Stop button (it's left enabled, unlike Record).
+    const cancelled = await runCountdown();
     countdownOverlay.style.display = 'none';
+    countdownOverlay.textContent = '';
+    if (cancelled) {
+      mode = 'idle';
+      armedSelect.disabled = false;
+      recordBtn.disabled = false;
+      stopBtn.disabled = true;
+      refreshPunchInHint();
+      drawStatic(sceneTime); // undo any pre-roll frames left on the canvas
+      return;
+    }
 
     mode = 'recording';
     sceneTime = punchInTime;
