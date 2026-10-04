@@ -17,17 +17,18 @@ export async function render(root, params) {
   const characterById = new Map(characters.map((c) => [c.id, c]));
   const objectById = new Map(objects.map((o) => [o.id, o]));
   const stickerById = new Map(stickers.map((s) => [s.id, s]));
-  // Characters and stickers are both puppeteered live and recorded into a
-  // track the same way — see engine/recorder.js — so they share one armed/
-  // recordable list. Plain objects are static and never appear here.
-  const recordableEntities = scene.entities.filter((e) => e.kind === 'character' || e.kind === 'sticker');
+  // Characters, stickers, and objects marked "Moving" are all puppeteered
+  // live and recorded into a track the same way — see engine/recorder.js —
+  // so they share one armed/recordable list. A "Still" object is static and
+  // never appears here.
+  const recordableEntities = scene.entities.filter((e) => e.kind === 'character' || e.kind === 'sticker' || (e.kind === 'object' && e.movable));
 
   if (recordableEntities.length === 0) {
     root.innerHTML = `
       <div class="panel">
         <h1>Animate</h1>
-        <p>This scene has no characters or stickers yet.</p>
-        <button class="btn accent" id="go-edit">Add characters or stickers in the scene editor</button>
+        <p>This scene has no characters, stickers, or moving objects yet.</p>
+        <button class="btn accent" id="go-edit">Add some in the scene editor</button>
       </div>`;
     root.querySelector('#go-edit').addEventListener('click', () => navigate('editor', { id: scene.id }));
     return;
@@ -159,14 +160,23 @@ export async function render(root, params) {
 
   function refreshDpadHelp() {
     const entity = recordableEntities.find((e) => e.id === armedEntityId);
-    const toggleLine = entity?.kind === 'sticker'
-      ? 'Appear / disappear (press): <span class="kbd">Space</span> or face button A / right trigger<br/>'
-      : 'Talk (hold): <span class="kbd">Space</span> or face button A / right trigger<br/>' +
+    let toggleLine = '';
+    let note = '';
+    if (entity?.kind === 'sticker') {
+      toggleLine = 'Appear / disappear (press): <span class="kbd">Space</span> or face button A / right trigger<br/>';
+      note = 'Starts hidden — press once to make it appear, again to hide it.';
+    } else if (entity?.kind === 'character') {
+      toggleLine =
+        'Talk (hold): <span class="kbd">Space</span> or face button A / right trigger<br/>' +
         'Switch pose: <span class="kbd">[</span> / <span class="kbd">]</span> or left/right bumper<br/>';
+      note = 'Eye direction and blinking are automatic.';
+    } else {
+      note = 'A moving object has no talk, pose, or appear/disappear controls — just movement.';
+    }
     dpadHelpEl.innerHTML = `
       Move: <span class="kbd">arrow keys</span> / <span class="kbd">WASD</span> or stick / d-pad<br/>
       ${toggleLine}
-      <em>${entity?.kind === 'sticker' ? 'Starts hidden — press once to make it appear, again to hide it.' : 'Eye direction and blinking are automatic.'}</em>
+      <em>${note}</em>
     `;
   }
 
@@ -339,7 +349,7 @@ export async function render(root, params) {
         prevMouthHeld = sample.mouthHeld;
         extra = { visible: stickerVisible };
         overlay = { visible: stickerVisible };
-      } else {
+      } else if (armedEntity.kind === 'character') {
         if (sample.poseStep) {
           currentPoseIndex = (currentPoseIndex + sample.poseStep + poseSequence.length) % poseSequence.length;
           updatePoseStatus();
@@ -347,6 +357,10 @@ export async function render(root, params) {
         const activePoseId = poseSequence[currentPoseIndex];
         extra = { mouthHeld: sample.mouthHeld, poseId: activePoseId };
         overlay = { mouthHeld: sample.mouthHeld, poseId: activePoseId };
+      } else {
+        // A moving object: position only, no talk/pose/visibility extras.
+        extra = {};
+        overlay = {};
       }
       const { x, y } = recorder.step(sample.dx, sample.dy, dt, extra);
       runtime.render(ctx, dt, (entityId) => {
@@ -455,6 +469,7 @@ export async function render(root, params) {
     refreshPoseSequenceForArmed();
     const entity = recordableEntities.find((e) => e.id === armedEntityId);
     const isSticker = entity.kind === 'sticker';
+    const isCharacter = entity.kind === 'character';
     // Punching in snaps the live take to exactly where the old track already
     // was at this instant (position, and pose/visibility) so there's no
     // visible jump the moment recording actually starts.
@@ -463,19 +478,24 @@ export async function render(root, params) {
     const startY = seedSample ? seedSample.y : entity.y;
     stickerVisible = isSticker && seedSample?.visible === true;
     prevMouthHeld = false;
-    if (!isSticker && seedSample?.poseId) {
+    if (isCharacter && seedSample?.poseId) {
       const seededIndex = poseSequence.indexOf(seedSample.poseId);
       if (seededIndex >= 0) {
         currentPoseIndex = seededIndex;
         updatePoseStatus();
       }
     }
+    // A sticker floats free of both the ground band and solid-object
+    // collision (see groundedY in engine/coords.js); a character or a
+    // moving object is grounded and blocked by solid obstacles the same
+    // way, excluding its own footprint in case the armed entity is itself
+    // a movable *and* solid object.
     recorder = new TrackRecorder(
       startX,
       startY,
       runtime.worldWidth,
       runtime.worldHeight,
-      isSticker ? [] : runtime.getSolidObstacles(),
+      isSticker ? [] : runtime.getSolidObstacles(entity.id),
       !isSticker,
       punchInTime
     );

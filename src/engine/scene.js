@@ -166,12 +166,17 @@ export class SceneRuntime {
    * (same width-matching, anchored at the same detected visual base) rather
    * than its full rendered height, so a character can still walk in front
    * of or behind a tall solid object per the normal Y-depth sort, and is
-   * only blocked from walking into its actual base. */
-  getSolidObstacles() {
+   * only blocked from walking into its actual base.
+   * @param {string|null} excludeEntityId omit the obstacle for this entity's
+   *   own id — needed when recording a movable *and* solid object, so it
+   *   doesn't collide with its own placed-position footprint the moment it
+   *   tries to move away from it. */
+  getSolidObstacles(excludeEntityId = null) {
     const obstacles = [];
     const shadowAspect = (this.fx.shadowImg && this.fx.shadowImg.width / this.fx.shadowImg.height) || 4;
     for (const entity of this.scene.entities) {
       if (entity.kind !== 'object' || !entity.solid) continue;
+      if (excludeEntityId && entity.id === excludeEntityId) continue;
       const obj = this.objectById.get(entity.refId);
       if (!obj) continue;
       const img = getCachedImage(obj.assetId);
@@ -197,9 +202,10 @@ export class SceneRuntime {
    * Render one frame.
    * @param {CanvasRenderingContext2D} ctx
    * @param {number} dt seconds since last frame (0 for a static/paused draw)
-   * @param {(entityId:string) => {x:number,y:number,mouthHeld:boolean,poseId?:string}|null} resolvePose
-   *   Returns the current live/playback pose sample for a character entity (position in the
-   *   2560x1440 reference space), or null to leave it at rest at its placed position.
+   * @param {(entityId:string) => {x:number,y:number,mouthHeld:boolean,poseId?:string,visible?:boolean}|null} resolvePose
+   *   Returns the current live/playback sample for a character, sticker, or movable object
+   *   entity (position in the 2560x1440 reference space), or null to leave it at rest at its
+   *   placed position.
    * @param {string|null} highlightEntityId optional entity to draw a selection ring around
    * @param {{fullWorld?:boolean, ghostHidden?:boolean}} opts fullWorld shows the entire
    *   (possibly larger-than-frame) world zoomed out to fit the canvas, ignoring camera follow —
@@ -217,9 +223,12 @@ export class SceneRuntime {
     // then depth-sort characters and objects together by how far "down" they
     // are in the scene — greater y = further forward = drawn later/on top.
     // The scene editor's manual z only breaks ties (e.g. two things placed
-    // at exactly the same y).
+    // at exactly the same y). A still (non-movable) object always just sits
+    // at its placed position; a movable one is puppeteered/played back the
+    // same way a character or sticker is.
     const resolved = this.scene.entities.map((entity) => {
-      if (entity.kind === 'character' || entity.kind === 'sticker') {
+      const tracked = entity.kind === 'character' || entity.kind === 'sticker' || (entity.kind === 'object' && entity.movable);
+      if (tracked) {
         const sample = resolvePose ? resolvePose(entity.id) : null;
         return { entity, x: sample ? sample.x : entity.x, y: sample ? sample.y : entity.y, sample };
       }
@@ -253,14 +262,18 @@ export class SceneRuntime {
       ctx.fillRect(offsetX, offsetY, this.worldWidth * scale, this.worldHeight * scale);
     }
 
-    // Pass 2: draw every character's shadow+body and every object in that
-    // depth order. Speech bubbles are deferred to pass 3 so they can be drawn
-    // above everything and checked for overlap against every character's
-    // now-known bounding box.
+    // Pass 2: draw every character's shadow+body and every (non-sticker)
+    // object in that depth order. Speech bubbles are deferred to pass 3 so
+    // they can be drawn above everything and checked for overlap against
+    // every character's now-known bounding box. Stickers are deferred
+    // further still, to pass 4, since they always render on the very top
+    // layer — above characters, objects, *and* speech bubbles — rather than
+    // taking part in the normal Y-depth sort at all.
     const talkers = [];
     const allCharacterBounds = [];
 
     for (const { entity, x, y, sample } of resolved) {
+      if (entity.kind === 'sticker') continue;
       if (entity.kind === 'character') {
         const character = this.characterById.get(entity.refId);
         if (!character) continue;
@@ -323,74 +336,84 @@ export class SceneRuntime {
           ctx.strokeRect(ox - dw / 2, oy - dh, dw, dh);
           ctx.restore();
         }
-      } else if (entity.kind === 'sticker') {
-        // Unlike a character, a sticker with no recorded track yet defaults
-        // to *invisible* rather than shown at its placed position — it's
-        // meant to pop into the scene at a chosen moment, not be on screen
-        // from the start. fullWorld (the scene editor) always shows it at
-        // full opacity regardless, since that's where its starting position
-        // gets placed; ghostHidden (the Animate view) shows it faintly
-        // instead of skipping it, so the user can see where it currently
-        // sits while deciding when to toggle it on; everywhere else
-        // (export/final render) a hidden sticker is skipped entirely, same
-        // as before this opacity behavior existed.
-        const visibleNow = sample?.visible === true;
-        const alpha = opts.fullWorld ? 1 : visibleNow ? 1 : opts.ghostHidden ? STICKER_GHOST_OPACITY : 0;
-        if (alpha <= 0) continue;
-        const sticker = this.stickerById.get(entity.refId);
-        if (!sticker) continue;
-        const img = getCachedImage(sticker.assetId);
-        if (!img) continue;
-        const size = entity.scale * REF_HEIGHT * scale;
-        const aspect = img.width / img.height || 1;
-        const dw = size * aspect;
-        const dh = size;
-        const ox = offsetX + (x - camX) * scale;
-        const oy = offsetY + (y - camY) * scale;
-
-        // Optional continuous motion (bounce/sway/spin), active only while
-        // actually visible — see StickerAnimState. Only one of bounceOffsetPx
-        // / angle is ever non-zero, since a sticker has exactly one movement
-        // mode at a time.
-        const state = this.stickerAnimStates.get(entity.id);
-        state.update(visibleNow, dt);
-        let angle = 0;
-        let bounceOffsetPx = 0;
-        if (visibleNow) {
-          if (entity.movement === 'bounce') bounceOffsetPx = stickerBounceOffsetPx(state.visibleClock);
-          else if (entity.movement === 'sway') angle = stickerSwayAngle(state.visibleClock);
-          else if (entity.movement === 'spin') angle = stickerSpinAngle(state.visibleClock);
-        }
-
-        ctx.save();
-        ctx.globalAlpha = alpha;
-        // bounceOffsetPx is in reference-space pixels (like every other
-        // distance in this app's data model — see engine/coords.js), so it's
-        // scaled down by the same factor as everything else here, keeping
-        // the bounce's apparent size consistent across the windowed stage,
-        // a full-world zoomed-out view, and export at a different resolution.
-        ctx.translate(ox, oy - bounceOffsetPx * scale);
-        ctx.rotate(angle);
-        ctx.drawImage(img, -dw / 2, -dh, dw, dh);
-        ctx.restore();
-        if (entity.id === highlightEntityId) {
-          ctx.save();
-          ctx.strokeStyle = '#2fa8ff';
-          ctx.lineWidth = 3;
-          ctx.setLineDash([8, 6]);
-          ctx.strokeRect(ox - dw / 2, oy - dh, dw, dh);
-          ctx.restore();
-        }
       }
     }
 
-    // Pass 3: speech bubbles, always on top, dimmed to 50% while covering
-    // another character so that character stays readable underneath.
+    // Pass 3: speech bubbles, above every character/object, dimmed to 50%
+    // while covering another character so that character stays readable
+    // underneath.
     for (const { entityId, state, geom } of talkers) {
       const rect = getSpeechBubbleRect(state, geom, this.fx.bubbleFrames);
       if (!rect) continue;
       const coversSomeoneElse = allCharacterBounds.some((b) => b.entityId !== entityId && rectsOverlap(rect, b.bounds));
       drawSpeechBubbleRect(ctx, rect, coversSomeoneElse ? 0.5 : 1);
+    }
+
+    // Pass 4: stickers, always the very top layer — above every character,
+    // object, and speech bubble — regardless of their own y position, so
+    // they never take part in the normal depth sort at all. Still ordered
+    // relative to *each other* by that same sort (resolved is already
+    // sorted by y/z from Pass 1), so two overlapping stickers still have a
+    // sensible relative depth.
+    for (const { entity, x, y, sample } of resolved) {
+      if (entity.kind !== 'sticker') continue;
+      // Unlike a character, a sticker with no recorded track yet defaults
+      // to *invisible* rather than shown at its placed position — it's
+      // meant to pop into the scene at a chosen moment, not be on screen
+      // from the start. fullWorld (the scene editor) always shows it at
+      // full opacity regardless, since that's where its starting position
+      // gets placed; ghostHidden (the Animate view) shows it faintly
+      // instead of skipping it, so the user can see where it currently
+      // sits while deciding when to toggle it on; everywhere else
+      // (export/final render) a hidden sticker is skipped entirely, same
+      // as before this opacity behavior existed.
+      const visibleNow = sample?.visible === true;
+      const alpha = opts.fullWorld ? 1 : visibleNow ? 1 : opts.ghostHidden ? STICKER_GHOST_OPACITY : 0;
+      if (alpha <= 0) continue;
+      const sticker = this.stickerById.get(entity.refId);
+      if (!sticker) continue;
+      const img = getCachedImage(sticker.assetId);
+      if (!img) continue;
+      const size = entity.scale * REF_HEIGHT * scale;
+      const aspect = img.width / img.height || 1;
+      const dw = size * aspect;
+      const dh = size;
+      const ox = offsetX + (x - camX) * scale;
+      const oy = offsetY + (y - camY) * scale;
+
+      // Optional continuous motion (bounce/sway/spin), active only while
+      // actually visible — see StickerAnimState. Only one of bounceOffsetPx
+      // / angle is ever non-zero, since a sticker has exactly one movement
+      // mode at a time.
+      const state = this.stickerAnimStates.get(entity.id);
+      state.update(visibleNow, dt);
+      let angle = 0;
+      let bounceOffsetPx = 0;
+      if (visibleNow) {
+        if (entity.movement === 'bounce') bounceOffsetPx = stickerBounceOffsetPx(state.visibleClock);
+        else if (entity.movement === 'sway') angle = stickerSwayAngle(state.visibleClock);
+        else if (entity.movement === 'spin') angle = stickerSpinAngle(state.visibleClock);
+      }
+
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      // bounceOffsetPx is in reference-space pixels (like every other
+      // distance in this app's data model — see engine/coords.js), so it's
+      // scaled down by the same factor as everything else here, keeping
+      // the bounce's apparent size consistent across the windowed stage,
+      // a full-world zoomed-out view, and export at a different resolution.
+      ctx.translate(ox, oy - bounceOffsetPx * scale);
+      ctx.rotate(angle);
+      ctx.drawImage(img, -dw / 2, -dh, dw, dh);
+      ctx.restore();
+      if (entity.id === highlightEntityId) {
+        ctx.save();
+        ctx.strokeStyle = '#2fa8ff';
+        ctx.lineWidth = 3;
+        ctx.setLineDash([8, 6]);
+        ctx.strokeRect(ox - dw / 2, oy - dh, dw, dh);
+        ctx.restore();
+      }
     }
   }
 }
